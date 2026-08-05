@@ -1,20 +1,24 @@
 # 视觉模型配置参考（references/providers.md）
 
-`visual-eyes` 的唯一后端是 **本地 Ollama + moondream**，数据全程不出本机，无需任何 API Key。
+`visual-eyes` 的唯一后端是 **本地 Ollama + MiniCPM-V**，数据全程不出本机，无需任何 API Key。
 
 ---
 
-## 模型说明：为什么是 moondream
+## 模型说明：为什么是 MiniCPM-V
 
-[moondream](https://huggingface.co/vikhyatk/moondream2) 是 moondream2 在 Ollama 中的量化版，
-一个 **2B 参数的小型视觉语言模型（VLM）**，专为"在所有地方高效运行"设计，支持
-Apple Silicon (MPS)、图像描述（caption）/ 视觉问答（VQA）/ 目标检测（detect）。
-这正是本 skill 需要的"输入图 → 输出文字"能力，而非图像/视频生成。
+[MiniCPM-V](https://github.com/OpenBMB/MiniCPM-V) 是面壁智能（OpenBMB）开源的视觉语言模型（VLM），
+基于 Qwen3.5 架构 + CLIP 视觉投影，支持 **图像理解 / 中英双语 OCR / 视觉问答 / 图表与 UI 理解**，
+Q4 量化后约 1.6GB，能在 Apple Silicon 上流畅运行。这正是本 skill 需要的"输入图 → 输出文字"
+能力，而非图像/视频生成。
 
-**已知局限（2B 量化的固有短板）：**
-- 默认倾向用英文回复（即使提示用中文）；OCR 对复杂版面会"描述"而非逐字转录。
+**相比 2B 量化的 moondream，MiniCPM-V 的优势：**
+- 中英文 OCR 准确：中文逐字转录基本无误，含全角标点、`¥` 等符号。
+- 视觉问答 / 数学 / 形状识别更可靠，能理解 UI 界面与图表。
+- 支持思考（thinking）模式与长上下文（256K）。
+
+**已知局限：**
+- 默认倾向用英文回复（即便用中文提问）——主模型应把结果翻译成用户语言。
 - 偶发返回空内容或触发 Ollama 5xx——`see.py` 已自动重试一次并给出明确错误。
-- 对某些复杂/文字密集图像可能理解不完整，可换更强模型（见下）。
 
 ---
 
@@ -23,12 +27,11 @@ Apple Silicon (MPS)、图像描述（caption）/ 视觉问答（VQA）/ 目标�
 ```bash
 brew install ollama                       # 或官网下载 https://ollama.com/download 安装包
 ollama serve                              # 启动本地服务（默认监听 :11434）
-ollama pull moondream:1.8b                # 拉取视觉模型（约 1.7 GB，首次需联网）
-ollama list                               # 确认 moondream:1.8b 已就绪
+ollama pull openbmb/minicpm-v4.6          # 拉取视觉模型（约 1.6 GB，首次需联网）
+ollama list                               # 确认 openbmb/minicpm-v4.6 已就绪
 ```
 
-> 若只 `ollama pull moondream`（得到 `moondream:latest`），`see.py` 默认请求
-> `moondream:1.8b` 时会自动回退到同 base 的已装模型并打印提示，无需手动处理。
+> 若默认模型未安装，`see.py` 会自动回退到同 base 的已装模型（如其它 openbmb 模型）并打印提示。
 
 ---
 
@@ -42,27 +45,23 @@ python scripts/see.py --image photo.jpg --prompt "图里有什么？"
 
 ### 给视觉模型的提示词技巧
 
-moondream 对"具体指令"的响应明显好于泛泛而谈，建议：
+提示词建议（MiniCPM-V 对"具体指令"的响应明显好于泛泛而谈）：
 - **描述**：`"用中文描述这张图的整体场景、主体和主要动作"`（比 `"这是什么"` 更稳定）。
-- **OCR**：**提问式 prompt 比命令式更稳定**——用
-  `"What text and numbers are visible in this image? List them."`
-  （或中文 `"图中可见哪些文字和数字？请列出。"`）。
+- **OCR**：直接让模型转录即可（中英均可）；用中文提问通常得到中文回复，逐字转录准确。
   可加 `--options '{"temperature":0.1}'`（低温更稳定、少重复；0 有时会反复输出同一句，建议 0.1）。
-  注意：moondream 对"逐字转录"类命令（如 `"Extract all text exactly as written"`）偶尔会
-  直接返回**空内容**；若遇到空输出，把 prompt 改成提问式再试，通常即恢复。
-- **目标检测**：`"Detect all people/objects with bounding boxes"`（moondream 支持 detect）。
-- **问答**：问题越具体越好，如 `"图里的红车车牌号是什么？"`。
+  若个别时候空输出，把 prompt 改成提问式（如 `"图中可见哪些文字和数字？请列出。"`）通常即恢复。
+- **问答**：问题越具体越好，如 `"图里的红车车牌号是什么？"`、`"这个登录界面上有哪些元素？"`。
 
 ### 切换 Ollama 里的其它视觉模型
 
-Ollama 生态还有多款视觉模型，直接换 `--model` 即可（如需更强效果可换体积更大的）：
+Ollama 生态还有多款视觉模型，直接换 `--model` 即可（如需更轻量可换 moondream）：
 
 ```bash
-ollama pull llava                  # ~4.7GB，经典多模态
-ollama pull minicpm-v              # 2B，OCR 稍好
-ollama pull qwen2.5vl:3b           # 3B，中英 OCR 与图表理解较好
-ollama pull llama3.2-vision:11b    # 11B，效果更强但更吃内存
-python scripts/see.py --image x.jpg --prompt "描述" --model minicpm-v
+ollama pull moondream:1.8b           # 2B，更轻量但 OCR/理解较弱
+ollama pull llava                    # ~4.7GB，经典多模态
+ollama pull qwen2.5vl:3b             # 3B，中英 OCR 与图表理解较好
+ollama pull llama3.2-vision:11b      # 11B，效果更强但更吃内存
+python scripts/see.py --image x.jpg --prompt "描述" --model moondream:1.8b
 ```
 
 ### 远程 / 容器部署的 Ollama

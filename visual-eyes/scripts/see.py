@@ -5,18 +5,18 @@ visual-eyes · see.py
 ====================
 给"没有视觉能力的模型"装一双眼睛。
 
-后端 = 本地 Ollama + moondream（moondream2 的本地量化版，
-一个 2B 参数的小型视觉语言模型，能在 Apple Silicon 上跑，
+后端 = 本地 Ollama + MiniCPM-V（面壁智能 OpenBMB 的视觉语言模型，
+支持图像理解 / 中英双语 OCR / 视觉问答，Q4 量化后能在 Apple Silicon 上跑，
 专门用于"看图理解"，而非图像/视频生成）。
 
 当你（主模型）遇到需要"看"的图像时，调用本脚本把它交给本地
-moondream 去理解，再把文字结果拿回来继续推理。
+MiniCPM-V 去理解，再把文字结果拿回来继续推理。
 
 数据全程不出本机，无需任何 API Key。脚本仅用 Python 标准库。
 
 用法：
   # 首次需拉取模型
-  ollama pull moondream:1.8b
+  ollama pull openbmb/minicpm-v4.6
 
   # 自然语言描述（默认）——把"看到的内容"当作主模型的眼睛
   python see.py --image photo.jpg --prompt "图里有什么？"
@@ -30,8 +30,8 @@ moondream 去理解，再把文字结果拿回来继续推理。
   # OCR 类任务建议低温（更稳定、少重复）
   python see.py --image scan.png --prompt "提取图中全部文字" --options '{"temperature":0.1}'
 
-  # 换成 Ollama 里的其它视觉模型（如 llava / minicpm-v / qwen2.5vl）
-  python see.py --image x.jpg --prompt "描述" --model llava
+  # 换成 Ollama 里的其它视觉模型（如 moondream / llava / qwen2.5vl）
+  python see.py --image x.jpg --prompt "描述" --model moondream:1.8b
 
   # 远程 / 容器里的 Ollama
   python see.py --image x.jpg --prompt "描述" \
@@ -60,11 +60,11 @@ import urllib.request
 
 
 # ===================== 默认配置 =====================
-# 本地 Ollama 服务（moondream 是 moondream2 在 Ollama 中的量化版，
-# 2B 参数的小型视觉语言模型，支持 caption / 视觉问答 / 目标检测）。
+# 本地 Ollama 服务（MiniCPM-V 是面壁智能 OpenBMB 的视觉语言模型，
+# 支持图像理解 / 中英 OCR / 视觉问答，Q4 量化后可在 Apple Silicon 上跑）。
 # Ollama 本地服务默认不鉴权。
 _OLLAMA_ENDPOINT = "http://localhost:11434/api/chat"
-_OLLAMA_MODEL = "moondream:1.8b"
+_OLLAMA_MODEL = "openbmb/minicpm-v4.6:latest"
 _DEFAULT_TIMEOUT = 180
 # 大图防护：base64 超过该阈值只告警；超过硬上限直接拒绝（必然超时/超上下文）
 _WARN_B64_BYTES = 4 * 1024 * 1024
@@ -259,7 +259,7 @@ def _attempt(endpoint, model, payload_builder, timeout):
     resp = _request_with_retry(endpoint, payload_builder, model, timeout)
     text = resp["message"]["content"]
     if not text.strip():
-        # moondream 偶发返回空内容（模型/图像怪癖），重试一次
+        # 视觉模型偶发返回空内容（模型/图像怪癖），重试一次
         sys.stderr.write("[visual-eyes] 模型返回空内容，重试一次…\n")
         resp = _request_with_retry(endpoint, payload_builder, model, timeout)
         text = resp["message"]["content"]
@@ -288,35 +288,35 @@ def run_chat(endpoint, requested_model, payload_builder, timeout, allow_fallback
 
 def suggest_ollama():
     sys.stderr.write(
-        "\n[visual-eyes] 未连接到本地 Ollama 服务。本 skill 默认使用本地 Ollama + moondream。\n"
+        "\n[visual-eyes] 未连接到本地 Ollama 服务。本 skill 默认使用本地 Ollama + MiniCPM-V。\n"
         "[visual-eyes] 安装并启动 Ollama 后重试：\n"
         "    1) 安装 Ollama（macOS）：\n"
         "       - 官网下载 https://ollama.com/download 安装包，或\n"
         "       - brew install ollama\n"
         "    2) 启动服务：打开 Ollama 应用，或执行 `ollama serve`（默认监听 :11434）\n"
-        "    3) 拉取视觉模型：ollama pull moondream:1.8b\n"
+        "    3) 拉取视觉模型：ollama pull openbmb/minicpm-v4.6\n"
         "    4) 验证：ollama list\n"
     )
 
 
 def list_config():
-    print("visual-eyes 当前配置（本地 Ollama + moondream）：")
+    print("visual-eyes 当前配置（本地 Ollama + MiniCPM-V）：")
     print(f"  backend : 本地 Ollama（数据不出本机，无需 API Key）")
     print(f"  endpoint: {_OLLAMA_ENDPOINT}")
-    print(f"  model   : {_OLLAMA_MODEL}  （moondream2 本地量化版，VL 视觉语言模型）")
+    print(f"  model   : {_OLLAMA_MODEL}  （MiniCPM-V 视觉语言模型，中英 OCR 强）")
     print(f"  timeout : {_DEFAULT_TIMEOUT}s（可用 --timeout 调）")
     print()
     print("图像来源：本地路径 / http(s) URL / data:URI / 纯 base64 / --stdin-base64")
     print("可选参数：--json / --options '{\"temperature\":0.1}' / --timeout <秒> / --model / --endpoint")
-    print("首次使用前请先 `ollama pull moondream:1.8b`，并确认 `ollama serve` 正在运行。")
+    print("首次使用前请先 `ollama pull openbmb/minicpm-v4.6`，并确认 `ollama serve` 正在运行。")
 
 
 def main():
-    ap = argparse.ArgumentParser(description="visual-eyes: 把图像交给本地 moondream 去看")
+    ap = argparse.ArgumentParser(description="visual-eyes: 把图像交给本地 MiniCPM-V 去看")
     ap.add_argument("--image", action="append",
                     help="图像：本地路径 / URL / data:URI / 纯 base64；可多次传入多图")
     ap.add_argument("--prompt", help="给视觉模型的指令/问题")
-    ap.add_argument("--model", help="Ollama 视觉模型名，默认 moondream；可换 llava 等")
+    ap.add_argument("--model", help="Ollama 视觉模型名，默认 MiniCPM-V；可换 moondream/llava 等")
     ap.add_argument("--endpoint", help="Ollama /api/chat 地址，默认 localhost:11434")
     ap.add_argument("--json", action="store_true",
                     help="以结构化 JSON 输出（text / caption / image_count / elapsed_s 等）")
@@ -397,7 +397,7 @@ def main():
             lines.append("本机已安装：" + "、".join(available))
             lines.append(f"请执行：ollama pull {e.model}")
         else:
-            lines.append("请先执行：ollama pull moondream:1.8b 并确认 `ollama serve` 正在运行")
+            lines.append("请先执行：ollama pull openbmb/minicpm-v4.6 并确认 `ollama serve` 正在运行")
         print_error("\n".join(lines), args.json)
         sys.exit(4)
     except urllib.error.HTTPError as e:
@@ -429,7 +429,7 @@ def main():
     if not text.strip():
         print_error(
             "视觉模型连续返回空内容（可能是模型量化问题或图像过复杂）。"
-            "建议：重试、换 --model（如 llava/minicpm-v），或把图像压缩后再试。",
+            "建议：重试、换 --model（如 moondream/llava），或把图像压缩后再试。",
             args.json)
         sys.exit(4)
 
