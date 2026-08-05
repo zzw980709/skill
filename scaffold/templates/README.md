@@ -5,7 +5,7 @@
 
 | 模板集 | 技术栈 | 说明 |
 |---|---|---|
-| `java-springboot-ddd/` | Java + Spring Boot + JPA | 项目版 DDD 四层（interfaces/application/domain/infrastructure）+ DDL，源自 altamira 项目写法沉淀 |
+| `java-springboot-ddd/` | Java + Spring Boot + JPA | DDD 四层（interfaces/application/domain/infrastructure）+ DDL|
 | `node-ts-express/` | Node.js + TypeScript + Express + Prisma | router / service / repository / dto + migration |
 | `python-fastapi/` | Python + FastAPI + SQLAlchemy | router / service / repository / schemas / model + migration |
 | `go-gin/` | Go + Gin + sqlx | handler / service / repository / model / dto |
