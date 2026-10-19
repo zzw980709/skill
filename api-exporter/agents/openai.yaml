@@ -1,0 +1,3 @@
+interface:
+  display_name: "API Exporter"
+  short_description: "Export Spring Boot endpoints to OpenAPI/Apifox"
