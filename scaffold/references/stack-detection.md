@@ -34,7 +34,7 @@
 - 统一响应：成功响应有没有统一包装（`{ code, data, message }` / `DataResponse` / 直接返回裸数据）。
 - 模型基类：实体/模型是否继承公共基类（BaseEntity / BaseModel / ActiveRecord 基类），公共字段
   （id / created_at / updated_at / deleted）怎么来的。
-- id 策略：自增 / UUID / cuid / 自定义生成器（如 `id_generator()`）。
+- id 策略：自增 / UUID / cuid / 自定义生成器（如数据库函数 / 雪花算法）。
 - 迁移：SQL 脚本目录、ORM migration（Prisma / Alembic / Flyway / Liquibase / EF Core Migrations）、还是 code-first 建表。
 - 测试：测试框架（JUnit / Vitest / Jest / Pytest / Go test / cargo test…）与跑测试的命令、CI 里实际跑什么。
 - 风格：缩进与宽度、命名（camelCase / snake_case）、注释语言、依赖注入方式（构造器 / field / 手动 new）。

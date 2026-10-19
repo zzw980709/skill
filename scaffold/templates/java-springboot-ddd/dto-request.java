@@ -1,6 +1,6 @@
 package {{basePackage}}.{{domainName}}.interfaces.dto;
 
-import com.coloseo.altamira.shop.interfaces.dto.OperatorRequest;
+import {{basePackage}}.common.dto.OperatorRequest;
 import lombok.Getter;
 import lombok.Setter;
 

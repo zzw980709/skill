@@ -3,7 +3,7 @@ package {{basePackage}}.{{domainName}}.application;
 import {{basePackage}}.{{domainName}}.domain.model.entity.{{EntityName}}Entity;
 import {{basePackage}}.{{domainName}}.domain.repository.{{EntityName}}Repository;
 import {{basePackage}}.{{domainName}}.interfaces.dto.{{EntityName}}Request;
-import com.coloseo.altamira.shop.domain.exception.BaseException;
+import {{basePackage}}.common.exception.BaseException;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;

@@ -1,7 +1,7 @@
 -- {{中文描述}}
 create table if not exists {{tableName}}
 (
-    id         text                 default id_generator() not null primary key,
+    id         text                 default gen_random_uuid() not null primary key,
     -- TODO(需求): 业务字段，字符串统一 text 类型
     name       text        null,
     created_at timestamptz not null default now(),

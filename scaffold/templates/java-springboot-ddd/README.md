@@ -1,6 +1,6 @@
 # Java Spring Boot（项目版 DDD）模板
 
-本模板集对应 **Java + Spring Boot + JPA、贫血实体 + application 编排** 的仓库，源自 altamira 项目的写法沉淀。
+本模板集对应 **Java + Spring Boot + JPA、贫血实体 + application 编排** 的仓库，源自实际项目的写法沉淀。
 同属本 skill 的其它模板集见 `templates/` 根目录。**注意：仓库的实际分层若与四层模板不一致（例如用 po/repository/service），照它的样，不硬套。**
 
 本目录是生成脚手架的**起点骨架**，不是免检答案。生成前**必须**按 `SKILL.md` 的【生成规范】读取目标领域/模板源的活代码，把模板与当前仓库的真实写法校准一致——尤其下表标注「⚠️ 需校准」的点。
@@ -9,13 +9,13 @@
 
 | 文件 | 对应分层 | 以哪个活代码为基准 |
 |---|---|---|
-| `entity.java` | `domain/model/entity` | `customer/.../CustomerSystemTagEntity` + `BaseEntity` |
-| `repository.java` | `domain/repository` | `customer/.../CustomerSystemTagRepository` |
-| `application.java` | `application/` | `customer/.../CustomerSystemTagApplication` |
-| `controller.java` | `interfaces/controller` | `customer/.../CustomerSystemTagController` |
-| `dto-request.java` | `interfaces/dto` | `customer/.../CustomerSystemTagRequest` |
-| `dto-response.java` | `interfaces/dto` | `customer/.../CustomerSystemTagResponse` |
-| `ddl.sql` | `resources/sql/` | `docs/harness/PROJECT_CONTEXT.md` 的建表约定 |
+| `entity.java` | `domain/model/entity` | 同域既有实体（含 `BaseEntity`） |
+| `repository.java` | `domain/repository` | 同域既有 repository |
+| `application.java` | `application/` | 同域既有 application |
+| `controller.java` | `interfaces/controller` | 同域既有 controller |
+| `dto-request.java` | `interfaces/dto` | 同域既有 request |
+| `dto-response.java` | `interfaces/dto` | 同域既有 response |
+| `ddl.sql` | `resources/sql/` | 项目的建表约定文档 |
 
 ## 占位符
 
@@ -23,20 +23,20 @@
 
 | 占位符 | 含义 | 示例 |
 |---|---|---|
-| `{{basePackage}}` | 根包 | `com.coloseo.altamira` |
+| `{{basePackage}}` | 根包 | `com.example.demo` |
 | `{{domainName}}` | 业务域包名（小写） | `customer`、`customerLevel` |
 | `{{EntityName}}` | 实体类名（不含 Entity 后缀时的主语） | `CustomerLevel` |
 | `{{entityName}}` | 同上，小驼峰 | `customerLevel` |
-| `{{tableName}}` | 表名（蛇形，前缀 `crm_` 等） | `crm_customer_level` |
+| `{{tableName}}` | 表名（蛇形，可带业务前缀） | `app_customer_level` |
 | `{{mapping}}` | Controller 的 `@RequestMapping` 路径 | `customer/level` |
 | `{{i18nKey}}` | 该资源的中文语义 key | `customer.level` |
-| `{{author}}` / `{{date}}` | 类注释作者 / 日期 | `zhengzhiwei` / `2026/08/03` |
+| `{{author}}` / `{{date}}` | 类注释作者 / 日期 | `Your Name` / `2025/01/01` |
 | `{{中文描述}}` | 类/表的中文注释 | `客户等级` |
 
 ## 校准清单（⚠️ 生成前逐项对照活代码）
 
-1. **BaseEntity 位置**：`BaseEntity` 定义在 `customer/domain/model/entity`。其它域引用它时，import 写 `com.coloseo.altamira.customer.domain.model.entity.BaseEntity`；若目标域有自己的基类，用它。
-2. **id 生成策略**：模板抄了 `@GeneratedValue(strategy = GenerationType.IDENTITY)`，与 DDL 约定 `id_generator()` 看似冲突但仓库如此；**以目标表/同域实体的实际注解为准**。
+1. **BaseEntity 位置**：`BaseEntity` 通常定义在公共域（如 `common/domain/model/entity`）。其它域引用它时，import 写 `{{basePackage}}.common.domain.model.entity.BaseEntity`；若目标域有自己的基类，用它。
+2. **id 生成策略**：模板抄了 `@GeneratedValue(strategy = GenerationType.IDENTITY)`，与 DDL 里的默认生成函数看似冲突但仓库如此；**以目标表/同域实体的实际注解为准**。
 3. **jsonb 字段**：实体含 jsonb 字段时才需要 `@TypeDef(name = "jsonb", typeClass = JsonBinaryType.class)` + 字段上 `@Type(type = "jsonb")`，不需要就删掉。
 4. **逻辑删除 SQL**：不同 repository 的 `logicDeleteById` 有的带 `updated_at = now()`、有的不带，以同域写法为准。
 5. **Request 是否 extends OperatorRequest**：需要操作人身份（管理端/销售端）时才继承；不需要就删。

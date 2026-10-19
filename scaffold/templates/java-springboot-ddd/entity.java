@@ -1,6 +1,6 @@
 package {{basePackage}}.{{domainName}}.domain.model.entity;
 
-import com.coloseo.altamira.customer.domain.model.entity.BaseEntity;
+import {{basePackage}}.common.domain.model.entity.BaseEntity;
 import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
