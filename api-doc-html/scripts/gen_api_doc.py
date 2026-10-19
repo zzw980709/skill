@@ -142,6 +142,8 @@ def type_label(schema):
         return f"array&lt;{type_label(schema.get('items', {}))}&gt;"
     if t in ("integer", "number") and schema.get("format"):
         return f"{t}({schema['format']})"
+    if t == "string" and schema.get("format") == "binary":
+        return "file"
     if schema.get("enum"):
         return f"{t} · enum"
     return t or "object"
@@ -268,11 +270,15 @@ def render_endpoint(op, method, path, comps, anchor, base_url):
     parts = []
     for ctype, content in ((op.get("requestBody") or {}).get("content") or {}).items():
         schema = content.get("schema") or {}
-        if ctype == "multipart/form-data":
-            parts.append('<h4>请求体</h4><div class="note">multipart/form-data 文件上传'
-                         f'<div class="muted">{esc(desc)}</div></div>')
-            continue
         sname = ref_name(schema) or "请求体"
+        if ctype == "multipart/form-data":
+            if schema.get("properties"):
+                parts.append(f"<h4>请求体 <span class='muted'>multipart/form-data</span></h4>")
+                parts.append(render_fields(schema, comps, sname))
+            else:
+                parts.append('<h4>请求体</h4><div class="note">multipart/form-data 文件上传'
+                             f'<div class="muted">{esc(desc)}</div></div>')
+            continue
         parts.append(f"<h4>请求体 <span class='muted'>{esc(ctype)}</span></h4>")
         parts.append(render_fields(schema, comps, sname))
         ex = example(schema, comps)
