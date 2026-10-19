@@ -6,11 +6,11 @@
 
 ```json
 {
-  "title": "营销活动 接口对接清单",
-  "out": "./营销活动-接口对接.html",
-  "srcRoots": ["/repo/spain-operation/src/main/java"],
+  "title": "模块 接口对接清单",
+  "out": "./模块-接口对接.html",
+  "srcRoots": ["/path/to/project/src/main/java"],
   "modules": [
-    { "title": "代金券活动（管理端）", "openapi": "voucher.json", "note": "响应包装 {success,message,data}" }
+    { "title": "订单模块（管理端）", "openapi": "orders.json", "note": "响应包装 {success,message,data}" }
   ]
 }
 ```
@@ -32,10 +32,10 @@
 
 ```json
 {
-  "title": "代金券 / 赠品（下单端）",
+  "title": "商品模块（客户端）",
   "openapi": "altamira.json",
-  "note": "响应包装 {data}；销售端传 erp_user_no，客户端传 user_id",
-  "baseUrl": "http://localhost:8080/v2"
+  "note": "响应包装 {data}；按客户端账号传 user_id",
+  "baseUrl": "http://localhost:8080/api"
 }
 ```
 
@@ -51,10 +51,10 @@
 ```json
 "enums": [
   {
-    "title": "赠品活动",
+    "title": "订单模块",
     "rows": [
-      ["giftGiveType", "1 送同款 / 2 送任意款"],
-      ["searchType", "1 活动产品（默认）/ 2 赠品"]
+      ["status", "1 草稿 / 2 已完成"],
+      ["type", "1 普通 / 2 加急"]
     ]
   }
 ]
@@ -66,8 +66,8 @@
 
 ```json
 "fieldDocs": {
-  "OrderActivityResponse.voucher_activity": "代金券活动（product_activities / site_wide_activities）",
-  "VoucherDetailVo.usage_records": "使用记录（usage_type 1 扣减 / 2 取消 / 3 补扣）"
+  "SomeResponse.related_items": "关联明细（含明细列表）",
+  "SomeDetailVo.records": "操作记录（type 1 新增 / 2 取消 / 3 补偿）"
 }
 ```
 

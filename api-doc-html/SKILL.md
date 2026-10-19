@@ -12,9 +12,9 @@ description: 把 OpenAPI 3 JSON 渲染成给前端对接用的单文件 HTML 接
 优先用 `api-exporter` skill 扫描 Spring Boot 源码（不启动应用）。典型命令：
 
 ```bash
-BIN=~/.agents/skills/api-exporter/tool/target/release/api-exporter
+BIN=<api-exporter-skill>/tool/target/release/api-exporter
 # 按控制器导出全部接口
-"$BIN" --project /path/to/repo --include 'controller:VoucherActivityController' --out /tmp/voucher.json
+"$BIN" --project /path/to/repo --include 'controller:OrderController' --out /tmp/orders.json
 # 只要其中几条（每行一条 spec）
 "$BIN" --project /path/to/repo --endpoints-file endpoints.txt --out /tmp/subset.json
 ```
@@ -31,14 +31,14 @@ BIN=~/.agents/skills/api-exporter/tool/target/release/api-exporter
 
    ```json
    {
-     "title": "赠品活动 接口对接清单",
-     "out": "./赠品活动-接口对接.html",
+     "title": "订单模块 接口对接清单",
+     "out": "./订单模块-接口对接.html",
      "srcRoots": ["/path/to/repo/src/main/java"],
      "modules": [
-       {"title": "赠品活动（管理端）", "openapi": "/tmp/gift.json", "note": "响应包装 {success,message,data}"}
+       {"title": "订单模块（管理端）", "openapi": "/tmp/orders.json", "note": "响应包装 {success,message,data}"}
      ],
-     "paramDocs": {"searchType": "1 活动产品（默认）/ 2 赠品"},
-     "enums": [{"title": "赠品活动", "rows": [["giftGiveType", "1 送同款 / 2 送任意款"]]}]
+     "paramDocs": {"status": "1 草稿 / 2 已完成"},
+     "enums": [{"title": "订单模块", "rows": [["status", "1 草稿 / 2 已完成"]]}]
    }
    ```
 

@@ -26,17 +26,12 @@ DEFAULT_PARAM_DOCS = {
     "page": "页码，从 1 开始",
     "pageSize": "每页条数",
     "per_page": "每页条数",
-    "companyId": "账套",
-    "company_id": "账套",
+    "companyId": "租户/账套 id",
+    "company_id": "租户/账套 id",
     "operator_id": "操作人 id（写操作日志）",
-    "activityId": "活动 id",
-    "orderId": "订单 id",
     "status": "状态（取值见接口说明/附录）",
-    "itemNo": "货号（模糊，不分大小写）",
-    "searchVal": "编号 / 名称（模糊）",
-    "user": "用户 id（客户端）",
-    "user_id": "客户端/小程序：账号 id（后端聚合该账号绑定的所有客户）",
-    "erp_user_no": "销售端：指定单个 ERP 客户号",
+    "user_id": "客户端：账号 id",
+    "user": "用户 id",
 }
 
 PLACEHOLDERS = {"string": "string", "integer": 0, "number": 0, "boolean": True}
