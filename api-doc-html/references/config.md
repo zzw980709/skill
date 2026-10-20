@@ -2,6 +2,8 @@
 
 `gen_api_doc.py --config <file>.json` 的完整字段。相对路径以配置文件所在目录为基准。
 
+> 单模块、无需 `fieldDocs`/`enums` 时，可跳过本文件，直接用 `scripts/gen_from_project.sh` 一条命令完成扫描 + 生成。
+
 ## 最小示例
 
 ```json
@@ -33,7 +35,7 @@
 ```json
 {
   "title": "商品模块（客户端）",
-  "openapi": "altamira.json",
+  "openapi": "orders.json",
   "note": "响应包装 {data}；按客户端账号传 user_id",
   "baseUrl": "http://localhost:8080/api"
 }

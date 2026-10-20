@@ -7,6 +7,24 @@ description: 把 OpenAPI 3 JSON 渲染成给前端对接用的单文件 HTML 接
 
 把 OpenAPI 3 JSON 渲染成**单文件、离线可用**的 HTML 接口对接文档。
 
+## 快速路径（推荐）
+
+源码在本地 Spring Boot 项目里时，一条命令完成「扫描 + 生成」：
+
+```bash
+scripts/gen_from_project.sh \
+  --project /path/to/repo \
+  --out ./订单模块-接口对接.html \
+  --title "订单模块 接口对接清单" \
+  --include 'controller:OrderController' \
+  --include 'GET /orders/{orderId}/confirmedActivities'
+```
+
+- 自动查找 `api-exporter`（也可用 `API_EXPORTER_BIN` 或 `--exporter` 指定）。
+- 支持 `--profile`、`--base-url`、`--src`、`--note`、`--exclude`、`--keep-openapi`。
+- 只有一个模块、无需 `fieldDocs`/`enums` 时优先用这条，少写一个配置文件、少两轮工具调用。
+- 复杂场景（多模块、枚举附录、字段补注）再走下面的配置流程。
+
 ## 前置：拿到 OpenAPI JSON
 
 优先用 `api-exporter` skill 扫描 Spring Boot 源码（不启动应用）。典型命令：
@@ -58,6 +76,12 @@ BIN=<api-exporter-skill>/tool/target/release/api-exporter
    ```
 
 5. **交付**：脚本会打印每个模块的接口数、总数和自检结果（锚点/标签/`$ref`）。把 HTML 路径给用户，并说明覆盖范围、Base URL、未包含的模块。
+
+## 性能说明
+
+- 字段注释扫描只解析 OpenAPI `components.schemas` 里出现过的 Java 类所在文件，不再逐行正则扫描整棵源码树。
+- 同一份 OpenAPI 只解析一次；正则已预编译。
+- 生成本身通常在亚秒级；真正的耗时大头是 `api-exporter` 扫描项目，用 `--include` 精确过滤接口，避免全量导出。
 
 ## 关键点
 

@@ -16,10 +16,18 @@ import json
 import re
 import sys
 from datetime import datetime
+from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 
 METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
+
+CLASS_RE = re.compile(r"\b(?:class|enum)\s+(\w+)")
+JSON_PROP_RE = re.compile(r'@JsonProperty\(\s*(?:value\s*=\s*)?"([^"]+)"\s*\)')
+FIELD_RE = re.compile(r"(?:private|public|protected)\s+[^;=()]+?\s+(\w+)\s*(?:=|;)")
+DOC_OPEN_RE = re.compile(r"^\s*/\*\*")
+DOC_CLOSE_RE = re.compile(r"\*/\s*$")
+DOC_STAR_RE = re.compile(r"^\s*\*\s?")
 
 # 通用查询参数说明（可按需在配置里 paramDocs 覆盖/扩展）
 DEFAULT_PARAM_DOCS = {
@@ -50,20 +58,33 @@ ENUMS = []
 
 def clean_doc(lines):
     text = "\n".join(lines)
-    text = re.sub(r"^\s*/\*\*", "", text)
-    text = re.sub(r"\*/\s*$", "", text)
+    text = DOC_OPEN_RE.sub("", text)
+    text = DOC_CLOSE_RE.sub("", text)
     out = []
     for line in text.splitlines():
-        line = re.sub(r"^\s*\*\s?", "", line).strip()
+        line = DOC_STAR_RE.sub("", line).strip()
         if not line or line.startswith("@author") or line.startswith("@date"):
             continue
         out.append(line)
     return " ".join(out).strip()
 
 
-def extract_field_docs(src_roots):
-    """扫描 Java 源码：class -> {jsonProperty: javadoc}。"""
+def extract_field_docs(src_roots, target_classes=None):
+    """扫描 Java 源码：class -> {jsonProperty: javadoc}。
+
+    target_classes 非空时只解析包含这些类名的文件（OpenAPI components.schemas），
+    避免每次都对整棵源码树做逐行正则解析。
+    """
     docs = {}
+    target_names = {n.split("$")[0].split(".")[0] for n in (target_classes or ()) if n}
+    target_re = None
+    needles = ()
+    if target_names:
+        if len(target_names) <= 80:
+            needles = tuple(f"{kw} {name}" for name in target_names for kw in ("class", "enum"))
+        else:
+            target_re = re.compile(
+                r"\b(?:class|enum)\s+(?:" + "|".join(map(re.escape, sorted(target_names))) + r")\b")
     for root in src_roots:
         root = Path(root)
         if not root.exists():
@@ -71,6 +92,12 @@ def extract_field_docs(src_roots):
             continue
         for path in root.rglob("*.java"):
             text = path.read_text(encoding="utf-8", errors="ignore")
+            if target_names:
+                if target_re is not None:
+                    if not target_re.search(text):
+                        continue
+                elif not any(needle in text for needle in needles):
+                    continue
             current_class = None
             pending_doc = None
             pending_json = None
@@ -91,18 +118,18 @@ def extract_field_docs(src_roots):
                         in_doc = True
                         doc_lines = [line]
                     continue
-                m = re.search(r"\b(?:class|enum)\s+(\w+)", line)
+                m = CLASS_RE.search(line)
                 if m:
                     current_class = m.group(1)
                     docs.setdefault(current_class, {})
                     pending_doc = None
                     pending_json = None
                     continue
-                m = re.search(r'@JsonProperty\("([^"]+)"\)', line)
+                m = JSON_PROP_RE.search(line)
                 if m:
                     pending_json = m.group(1)
                     continue
-                m = re.match(r"(?:private|public|protected)\s+[^;=()]+?\s+(\w+)\s*(?:=|;)", line)
+                m = FIELD_RE.match(line)
                 if m and current_class:
                     prop = pending_json or m.group(1)
                     if pending_doc:
@@ -110,6 +137,20 @@ def extract_field_docs(src_roots):
                     pending_doc = None
                     pending_json = None
     return docs
+
+
+@lru_cache(maxsize=32)
+def load_openapi(path):
+    """同一份 OpenAPI 只解析一次（字段名收集和渲染共用）。"""
+    return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def collect_schema_names(modules):
+    names = set()
+    for module in modules:
+        data = load_openapi(module["openapi"])
+        names.update((data.get("components") or {}).get("schemas", {}).keys())
+    return names
 
 
 def is_constant(name):
@@ -301,7 +342,7 @@ def slug(text):
 
 
 def render_module(module):
-    data = json.loads(Path(module["openapi"]).read_text(encoding="utf-8"))
+    data = load_openapi(module["openapi"])
     title = module["title"]
     base_url = module.get("baseUrl") or (data.get("servers") or [{"url": ""}])[0].get("url", "")
     comps = data.get("components", {}).get("schemas", {})
@@ -556,7 +597,7 @@ def apply_config(cfg):
     MODULES = cfg.get("modules", [])
     PARAM_DOCS = {**DEFAULT_PARAM_DOCS, **(cfg.get("paramDocs") or {})}
     EXTRA_FIELD_DOCS = dict(cfg.get("fieldDocs") or {})
-    FIELD_DOCS = extract_field_docs(cfg.get("srcRoots") or [])
+    FIELD_DOCS = extract_field_docs(cfg.get("srcRoots") or [], collect_schema_names(MODULES))
 
 
 def parse_module_arg(raw):
