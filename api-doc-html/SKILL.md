@@ -1,106 +1,92 @@
 ---
 name: api-doc-html
-description: 把 OpenAPI 3 JSON 渲染成给前端对接用的单文件 HTML 接口文档（左侧导航+搜索、请求/响应字段表、嵌套结构、示例 JSON、枚举附录、按模块分 Base URL、可打印）。当用户要"导出/生成接口对接文档""给前端一份接口清单""按模块/控制器导出 API 文档""把 OpenAPI 变成 HTML"，或要求接口文档包含字段说明、示例、枚举取值时使用。通常先用 api-exporter 扫描 Spring Boot 项目产出 OpenAPI JSON，再用本 skill 渲染 HTML。
+description: 将 OpenAPI 3 JSON 生成为单文件、离线可用的 HTML 接口对接文档，含接入约定、页面调用流程、功能导航、字段约束、错误响应、Fetch / TypeScript 示例与可复制的前端 Agent 交接包。用户要 HTML 或便于前端阅读的接口清单时使用；仅导出 OpenAPI、查询端点或同步 Apifox 时使用 api-exporter。
 ---
 
 # api-doc-html
 
-把 OpenAPI 3 JSON 渲染成**单文件、离线可用**的 HTML 接口对接文档。
+生成面向前端实施的对接手册：从页面动作找到接口，明确请求、响应、错误和调用方式。OpenAPI 是契约输入，业务接入说明通过配置补充。已有 OpenAPI JSON 时直接渲染，不必扫描 Spring Boot 源码。
+所有脚本路径相对本 skill 目录；从目标项目执行时使用 skill 的绝对路径。需要 Python 3，仅用标准库。
 
-## 快速路径（推荐）
+## 选择输入方式
 
-源码在本地 Spring Boot 项目里时，一条命令完成「扫描 + 生成」：
-
-```bash
-scripts/gen_from_project.sh \
-  --project /path/to/repo \
-  --out ./订单模块-接口对接.html \
-  --title "订单模块 接口对接清单" \
-  --include 'controller:OrderController' \
-  --include 'GET /orders/{orderId}/confirmedActivities'
-```
-
-- 自动查找 `api-exporter`（也可用 `API_EXPORTER_BIN` 或 `--exporter` 指定）。
-- 支持 `--profile`、`--base-url`、`--src`、`--note`、`--exclude`、`--keep-openapi`。
-- 只有一个模块、无需 `fieldDocs`/`enums` 时优先用这条，少写一个配置文件、少两轮工具调用。
-- 复杂场景（多模块、枚举附录、字段补注）再走下面的配置流程。
-
-## 前置：拿到 OpenAPI JSON
-
-优先用 `api-exporter` skill 扫描 Spring Boot 源码（不启动应用）。典型命令：
+**已有 OpenAPI JSON**：直接运行渲染器；`--src` 可选，用于补充 Java 字段注释。
 
 ```bash
-BIN=<api-exporter-skill>/tool/target/release/api-exporter
-# 按控制器导出全部接口
-"$BIN" --project /path/to/repo --include 'controller:OrderController' --out /tmp/orders.json
-# 只要其中几条（每行一条 spec）
-"$BIN" --project /path/to/repo --endpoints-file endpoints.txt --out /tmp/subset.json
+python3 <skill-dir>/scripts/gen_api_doc.py --title "订单接口" --out ./orders.html \
+  --module "订单=/path/to/orders.json" \
+  --src /path/to/repo/src/main/java
 ```
 
-也可以直接用任何现成的 OpenAPI 3 JSON。
+**本地 Spring Boot 源码**：先按同库 `api-exporter/SKILL.md` 准备 CLI，再一条命令扫描并渲染：
 
-## 工作流
+```bash
+bash <skill-dir>/scripts/gen_from_project.sh \
+  --project /path/to/repo --out ./orders.html --title "订单接口" \
+  --include 'controller:OrderController'
+```
 
-1. **确认范围**：要哪些模块/接口、给谁看（管理端/下单端/客户端）、输出路径、是否需要枚举附录。
-   - 多个模块（如管理端 + 下单端）→ 每个模块一份 JSON，文档里按模块分节、各自 Base URL。
-2. **导出 JSON**（见上，按需过滤接口）。
-3. **写配置**：推荐配置文件，便于复现和以后更新；字段见 [references/config.md](references/config.md)。
-   最小配置：
+明确要全量接口时用 `--all`；其它过滤用 `--include` / `--exclude`。
+支持 `--profile`、`--base-url`、`--src`、`--note`、`--keep-openapi`。
+脚本优先使用 `--exporter` / `API_EXPORTER_BIN`，再查找同库及常见安装位置或 PATH；不会自动编译。
+若只单独安装了本 skill，使用已有 JSON 或通过 `--exporter` 指向可用 CLI 即可。
+扫描只用于生成文件，不能因环境里配置了 Apifox 凭据而执行导入。
 
-   ```json
-   {
-     "title": "订单模块 接口对接清单",
-     "out": "./订单模块-接口对接.html",
-     "srcRoots": ["/path/to/repo/src/main/java"],
-     "modules": [
-       {"title": "订单模块（管理端）", "openapi": "/tmp/orders.json", "note": "响应包装 {success,message,data}"}
-     ],
-     "paramDocs": {"status": "1 草稿 / 2 已完成"},
-     "enums": [{"title": "订单模块", "rows": [["status", "1 草稿 / 2 已完成"]]}]
-   }
-   ```
+**多模块、字段补注或枚举附录**：读 [配置说明](references/config.md)，使用配置文件。
+配置中的相对路径以配置文件目录为基准；命令行路径以当前目录为基准。
 
-4. **生成**：
+```json
+{
+  "title": "订单接口",
+  "out": "./orders.html",
+  "modules": [{"title": "管理端", "openapi": "./orders.json"}],
+  "fieldDocs": {"Order.status": "状态，取值以业务定义为准"}
+}
+```
 
-   ```bash
-   python3 scripts/gen_api_doc.py --config doc-config.json
-   ```
+```bash
+python3 <skill-dir>/scripts/gen_api_doc.py --config doc-config.json
+```
 
-   临时用也可以不开配置文件：
+## 按前端任务组织内容
 
-   ```bash
-   python3 scripts/gen_api_doc.py --title "订单接口" --out /tmp/order.html \
-     --module "订单=/tmp/order.json|下单端" \
-     --module "商品=/tmp/product.json" \
-     --src /path/to/repo/src/main/java
-   ```
+生成前读取相关需求和实现，在有依据时补充配置：
 
-5. **交付**：脚本会打印每个模块的接口数、总数和自检结果（锚点/标签/`$ref`）。把 HTML 路径给用户，并说明覆盖范围、Base URL、未包含的模块。
+- `integration`：登录态来源、分页与空值、金额单位、时间格式、统一错误等项目级约定。
+- `workflows`：按页面动作排列真实调用链，每步关联唯一接口，并说明前一步哪些数据供下一步使用。
+- `operationDocs`：接口的使用时机、状态驱动的按钮、成功后刷新范围、错误提示与重试注意事项。
 
-## 性能说明
+不强制每个接口写全套说明。无法确定的约定保留缺失提示，用户只要格式转换时直接生成，不为补齐文案扩大调查。
+配置结构与类型限制见 [配置说明](references/config.md)；风格与完整演示见 [示例配置](examples/doc-config.json)。
 
-- 字段注释扫描只解析 OpenAPI `components.schemas` 里出现过的 Java 类所在文件，不再逐行正则扫描整棵源码树。
-- 同一份 OpenAPI 只解析一次；正则已预编译。
-- 生成本身通常在亚秒级；真正的耗时大头是 `api-exporter` 扫描项目，用 `--include` 精确过滤接口，避免全量导出。
+生成结果包含接入首页、功能名称导航、接口详情和并排代码示例；接口的请求、成功响应、异常响应分别查看。
 
-## 关键点
+## 交给前端 Agent
 
-- **字段说明来自 Java Javadoc**：`srcRoots` 必填（可多个仓库）。脚本会按 `@JsonProperty("x")` 或字段名映射；没有注释的字段显示 `—`。
-- **Base URL 自动取 OpenAPI 的 `servers[0].url`**；同一份文档里不同模块可以用不同 Base，复制按钮会拼对应模块的地址。需要覆盖时在模块里加 `baseUrl`。
-- **自动跳过 Java 常量**：api-exporter 会把 `static final` 字段也扫成属性（如 `DATE_FORMATTER`），脚本已过滤。
-- **无响应体的接口**（文件下载、`ResponseEntity<Object>`）会显示"文件流 / 无 JSON 响应体"或只显示类型，不报错。
-- **分页/包装**：脚本不猜业务包装，包装结构以 JSON 为准；在模块 `note` 或 `heroNotes` 里写清楚（例如 `{success,message,data}` 与 `{total,data,page,pageSize}`）。
-- **参数说明**：OpenAPI 里没有描述时，用 `paramDocs` 补（脚本内置少量通用项：page/pageSize/companyId/operator_id 等）。
-- **枚举/取值**：`enums` 手写，按模块分卡片；不要指望从 Java 枚举自动推导。
+文档的「交给 Agent」模块支持按全部、模块、调用流程或单接口复制 Markdown 任务、下载 `.md` 或 JSON 契约包。
+每个接口页也有单接口交接入口。任务包包括原始 OpenAPI、引用模型、继承鉴权、接入约定、业务说明和待确认项；不把推导的 TypeScript 当成原始契约。
 
-## 输出特性
+用户已有明确的前端任务时，可用配置 `agent.task`、`agent.constraints` 和 `agent.acceptanceCriteria` 补充任务、约束和验收条件；没有依据时保持空缺。
+任务与验收要求应适用于可选接口范围；专属规则放在接口 `operationDocs`，或明确适用条件，避免单接口导出夹带其它页面任务。
+接收方 Agent 应先读其前端仓库指令，复用现有请求、类型与错误封装；未指定的页面、权限和行为不能从接口名推断。
+交接文件只包含资料与任务，不授权发布、提交代码或调用真实业务接口。
+保留单文件离线能力，`assets/` 中的 CSS 与 JS 生成时内联，不使用 CDN 或外部字体。
 
-> 生成的 HTML 含接口路径、字段与业务语义，默认只放本地/内部分享；不要提交到公开仓库。
+## 内容准确性
 
-左侧导航 + 关键词过滤、每个接口复制完整 URL、请求参数表、请求/响应字段表（嵌套展开 3 层）、请求/响应示例 JSON、枚举附录、打印样式、无外部依赖（可直接发给前端）。
+- 根据用户范围选择接口；不明确时先从现有上下文或 `api-exporter --list` 定位，不自动扩大到全项目。
+- 字段说明可来自配置 `fieldDocs`、Java Javadoc 或 OpenAPI description。没有依据的说明保留空缺，不编造枚举、权限或业务包装。
+- `srcRoots` 可省略；只有补充 Java 注释才需要。参数描述优先 OpenAPI，其次 `paramDocs`；不从参数名自动推断业务含义。
+- 每个模块默认取 `servers[0].url`，可用模块 `baseUrl` 覆盖；核对 context-path 没有与 path 重复。
+- `enums` 是人工配置的附录；以源码或用户提供的定义为依据，不承诺自动推导 Java 枚举。
+- 保留契约中的大写字段；请求过滤 readOnly，响应过滤 writeOnly。递归、深层结构和联合类型需结合 TypeScript 检查。
+- 标注示例来源：优先接口提供的示例，否则注明按 Schema 生成并需替换占位值。Fetch 是调用骨架，TypeScript 是契约推导，不替代项目封装与运行时校验。
+- 无响应 schema 只说明静态信息不足，不能直接推断接口没有响应体或一定是文件下载。
 
-## 常见问题
+## 验证与交付
 
-- **字段说明全是 `—`**：`srcRoots` 没传或路径不对；确认指向 `src/main/java`。
-- **接口数不对**：`--include` 的 path 是精确匹配，前缀要用 `path:/xxx/**`；先用 api-exporter `--list` 预览。
-- **模块标题里的中文 id**：脚本会把标题 slug 化生成锚点，无需手动处理。
+检查命令退出码、每模块接口数量及脚本自检结果，发现零接口或自检异常时先处理。
+自检覆盖 HTML 标签、锚点和重复 ID，不等同于完整 OpenAPI 或业务语义校验。
+有浏览器预览能力时，抽查调用流程跳转、搜索与方法筛选、详情标签、嵌套字段、代码切换与复制、窄屏布局、打印，以及 Agent 范围选择、任务复制与下载；未预览时如实说明。
+
+交付 HTML 路径、接口覆盖范围、Base URL 和未能确定的描述。发布或同步属于额外动作，按用户要求执行。

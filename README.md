@@ -1,14 +1,39 @@
 # Skills
 
-个人 Claude Code Skills 仓库,存放自己编写/使用的 skills。
+个人技能库，可用于 Codex、Claude Code 等支持 `SKILL.md` 的代理。
+每个目录包含独立入口，以及按需读取的脚本、参考资料或模板。
 
-每个 skill 是一个独立目录,包含 `SKILL.md`(技能说明与触发条件)以及所需的脚本、参考资料。安装时把对应 skill 目录链接或复制到 `~/.claude/skills/` 即可。
+| Skill | 适用任务 | 前置条件 |
+| --- | --- | --- |
+| [scaffold](scaffold/SKILL.md) | 按现有仓库结构新增模块、接口、实体或 CRUD 骨架 | 目标仓库代码与构建环境；内置 Java、Node/TS、Python、Go 模板 |
+| [api-exporter](api-exporter/SKILL.md) | 查询或筛选 Spring Boot 端点，导出 OpenAPI JSON，按需同步 Apifox | Rust/Cargo 编译内置 CLI；同步时需要 Apifox 凭据 |
+| [api-doc-html](api-doc-html/SKILL.md) | 生成带接入约定、页面流程、字段契约、Fetch / TypeScript 示例及 Agent 交接包的单文件对接手册 | Python 3；从源码生成时另需 api-exporter |
+| [visual-eyes](visual-eyes/SKILL.md) | 主模型无法读图或指定 Ollama 时，进行 OCR、图片问答和对比 | Python 3.10+、Ollama 服务和视觉模型 |
 
-## 已有 Skills
+## 安装
 
-| Skill | 目录 | 说明 |
-| ----- | ---- | ---- |
-| visual-eyes | `visual-eyes/` | 给没有视觉能力的模型装"眼睛":通过本地 Ollama + MiniCPM-V 视觉模型识别图片/截图/扫描件,返回文字或结构化结果(支持 OCR、多图对比、图像问答)。中英双语 OCR 准确,全程本地运行,无需 API Key。 |
-| scaffold | `scaffold/` | 从需求产出符合当前仓库分层与规范、可直接合入主干的代码。技术栈不固定:先识别工作目录的技术栈与代码约定(构建清单 + 源码布局 → 约定快照),选对应内置模板集(`templates/<stack>/`,覆盖 Java/Spring Boot DDD、Node/TS Express、Python FastAPI、Go Gin)当骨架,再按"可行性分析 → 计划 → 任务清单 → 用户确认 → 生成 → 复审"的闸门式流程产出镜像仓库真实写法的代码,始终以活代码校准。 |
-| api-exporter | `api-exporter/` | 静态扫描 Spring Boot 源码生成 OpenAPI 3.0 并导入 Apifox(tree-sitter 解析,无需启动服务、无需 classpath)。**skill 内置工具源码**(`tool/`,Rust),首次使用 `cargo build --release` 编译一次即可,不依赖外部工程。支持只导出**指定接口**:按路径(精确/glob)、控制器、`@Api` 分组、HTTP 方法、Java 方法名筛选,或用清单文件批量指定,`--list` 可先预览全部接口;被筛掉的接口不再解析、未被引用的数据模型自动剔除,产物可直接导入 Apifox 或任意 OpenAPI 工具。附 `scripts/check_document.py` 校验脚本(悬空引用/operationId 重复/缺少 2xx/path 参数不符)。 |
-| api-doc-html | `api-doc-html/` | 将 OpenAPI 3 JSON 生成为单文件、离线可用的 HTML 接口对接文档，包含左侧导航与搜索、请求/响应字段表、嵌套结构、示例 JSON、枚举附录、模块分组及各自 Base URL，并支持打印。通常与 `api-exporter` 配合，先从 Spring Boot 源码导出 OpenAPI JSON，再生成面向前端的接口文档。 |
+将需要的 skill 目录复制或链接到对应代理的技能目录，例如 `~/.codex/skills/` 或 `~/.claude/skills/`。
+也可使用支持这些目录的代理所配置的其它技能路径。不要仅复制 `SKILL.md`，脚本、参考资料及模板需要保留。
+
+两个 API skill 一起安装时保留同级目录，方便查找工具；分开安装可用 `--exporter` 或 `API_EXPORTER_BIN` 指定可执行文件。
+命令中的 `<skill-dir>` 需换成实际安装目录；输出文件路径按任务指定，不依赖代理的当前工作目录恰好是技能目录。
+
+## 使用边界
+
+- 要 OpenAPI JSON、查端点或同步 Apifox：用 `api-exporter`。
+- 要可读 HTML：用 `api-doc-html`；已有 JSON 时无需扫描源码。
+- 要镜像仓库结构生成模块：用 `scaffold`，局部修复无需套用整套流程。
+- 主模型能直接看图时，通常无需 `visual-eyes`。
+
+纯文件导出使用 `api-exporter --dry-run`，避免环境中已有 Apifox 凭据时触发远程导入。
+`visual-eyes --json` 返回 JSON 封装，正文 `text` 仍是视觉模型的原始回复。
+
+## 验证
+
+HTML 源码导出流程的离线回归测试（不连接 Apifox，不需要 Rust 编译产物）：
+
+```bash
+python3 -m unittest discover -s api-doc-html/tests -v
+```
+
+前端手册效果演示：[订单中心对接手册](api-doc-html/examples/frontend-guide.html)（虚构数据）。

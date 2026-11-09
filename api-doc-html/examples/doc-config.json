@@ -1,0 +1,122 @@
+{
+  "title": "订单中心 · 前端对接手册",
+  "description": "列表、详情、创建与取消，把订单页面的每一个动作接起来。以下为虚构演示数据。",
+  "audience": "管理后台 / Web 前端",
+  "out": "./frontend-guide.html",
+  "modules": [
+    {
+      "title": "订单管理",
+      "openapi": "./orders.openapi.json",
+      "note": "演示环境 · 所有金额使用分，所有时间使用 UTC"
+    }
+  ],
+  "integration": [
+    {
+      "title": "登录态与请求头",
+      "text": "从项目登录态取得访问令牌，以 Authorization: Bearer <token> 传入。HTTP 401 时按项目约定回到登录页。"
+    },
+    {
+      "title": "分页与空状态",
+      "text": "page 从 1 开始，pageSize 默认 20。列表读取 items，总数读取 total；items=[] 时展示空状态。"
+    },
+    {
+      "title": "金额、时间与错误",
+      "text": "金额单位为分；UTC 时间按用户时区显示。非 2xx 响应读取 code、message，反馈问题时附 requestId。"
+    }
+  ],
+  "workflows": [
+    {
+      "title": "列表 → 详情 → 取消",
+      "description": "订单管理页的查询与操作链路",
+      "steps": [
+        {
+          "operationId": "listOrders",
+          "note": "用 page、pageSize、status 驱动列表。"
+        },
+        {
+          "operationId": "getOrder",
+          "note": "点击行后使用 id 读取最新详情。"
+        },
+        {
+          "operationId": "cancelOrder",
+          "note": "操作成功后重新查询列表与详情。"
+        }
+      ]
+    },
+    {
+      "title": "填写商品 → 提交订单",
+      "description": "创建表单的提交与结果处理",
+      "steps": [
+        {
+          "operationId": "createOrder",
+          "note": "禁用提交按钮，防止重复点击；422 时保留表单内容。"
+        },
+        {
+          "operationId": "getOrder",
+          "note": "使用创建响应中的 id 跳转详情。"
+        }
+      ]
+    }
+  ],
+  "operationDocs": {
+    "listOrders": {
+      "notes": [
+        "切换状态筛选时将 page 重置为 1。",
+        "快速切换筛选条件时取消旧请求，避免旧响应覆盖新结果。",
+        "不传 status 表示全部；不要发送空字符串。"
+      ]
+    },
+    "getOrder": {
+      "usage": "进入订单详情或完成订单操作后刷新页面数据时调用。",
+      "notes": [
+        "路由参数使用订单 id，不使用展示编号 orderNo。",
+        "404 时展示订单不存在，并提供返回列表入口。"
+      ]
+    },
+    "createOrder": {
+      "usage": "用户在创建表单确认商品、数量后提交。",
+      "notes": [
+        "金额由后端计算，前端无需提交 totalAmount。",
+        "请求进行中禁用提交按钮；网络失败后的重试策略需与后端对齐。"
+      ]
+    },
+    "cancelOrder": {
+      "usage": "用户在待支付订单上确认取消后调用。",
+      "notes": [
+        "仅 pending 状态展示取消入口；后端仍校验实时状态。",
+        "成功响应为 204，不要调用 response.json()。",
+        "409 表示订单状态已变化，提示用户并刷新详情。"
+      ]
+    }
+  },
+  "enums": [
+    {
+      "title": "订单状态与界面行为",
+      "rows": [
+        [
+          "pending",
+          "待支付 · 可展示取消入口"
+        ],
+        [
+          "paid",
+          "已支付 · 不展示取消入口"
+        ],
+        [
+          "cancelled",
+          "已取消 · 只读展示"
+        ]
+      ]
+    }
+  ],
+  "agent": {
+    "task": "将所选接口接入已有订单管理页面，复用项目当前的请求、鉴权与类型约定。",
+    "constraints": [
+      "不新增与现有请求层重复的 API 客户端。",
+      "只实现所选接口范围内已确认的行为。"
+    ],
+    "acceptanceCriteria": [
+      "涉及列表接口时，订单状态筛选变化应将页码重置为 1。",
+      "对取消接口的 204 成功与 409 状态冲突分别处理；本条仅在范围包含取消接口时适用。"
+    ]
+  }
+}

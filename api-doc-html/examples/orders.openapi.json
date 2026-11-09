@@ -1,0 +1,421 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "订单服务 · 演示契约",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://api.example.com/v1"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/orders": {
+      "get": {
+        "summary": "查询订单列表",
+        "operationId": "listOrders",
+        "tags": [
+          "订单管理"
+        ],
+        "description": "订单列表页首次加载、切换分页或筛选状态时调用。",
+        "parameters": [
+          {
+            "name": "page",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "description": "页码，从 1 开始。"
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "description": "每页条数。"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "paid",
+                "cancelled"
+              ]
+            },
+            "description": "不传则查询所有状态。"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "登录态已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "创建订单",
+        "operationId": "createOrder",
+        "tags": [
+          "订单管理"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrder"
+              },
+              "example": {
+                "items": [
+                  {
+                    "skuId": "sku_1001",
+                    "quantity": 2
+                  }
+                ],
+                "remark": "请工作日配送"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "库存不足或字段校验失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{orderId}": {
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "description": "使用列表响应中的 id，而非 orderNo。",
+          "schema": {
+            "type": "string",
+            "example": "ord_1024"
+          }
+        }
+      ],
+      "get": {
+        "summary": "获取订单详情",
+        "operationId": "getOrder",
+        "tags": [
+          "订单管理"
+        ],
+        "responses": {
+          "200": {
+            "description": "成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Order"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "订单不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{orderId}/cancel": {
+      "parameters": [
+        {
+          "name": "orderId",
+          "in": "path",
+          "required": true,
+          "description": "使用列表响应中的 id，而非 orderNo。",
+          "schema": {
+            "type": "string",
+            "example": "ord_1024"
+          }
+        }
+      ],
+      "post": {
+        "summary": "取消未支付订单",
+        "operationId": "cancelOrder",
+        "tags": [
+          "订单管理"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "reason"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 100,
+                    "description": "用户填写的取消原因。",
+                    "example": "暂时不需要"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "取消成功，无响应体"
+          },
+          "409": {
+            "description": "状态冲突，订单无法取消",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Order": {
+        "type": "object",
+        "required": [
+          "id",
+          "orderNo",
+          "status",
+          "totalAmount",
+          "createdAt"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "订单 ID，路由与后续操作使用此字段。",
+            "example": "ord_1024",
+            "readOnly": true
+          },
+          "orderNo": {
+            "type": "string",
+            "description": "展示给用户的订单编号。",
+            "example": "SO202601010024",
+            "readOnly": true
+          },
+          "status": {
+            "type": "string",
+            "description": "控制状态标签和可见操作；最终权限由服务端校验。",
+            "enum": [
+              "pending",
+              "paid",
+              "cancelled"
+            ],
+            "x-enumNames": [
+              "待支付",
+              "已支付",
+              "已取消"
+            ]
+          },
+          "totalAmount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "应付金额，单位为分；展示时除以 100。",
+            "example": 12800
+          },
+          "customer": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "收件人姓名。",
+                "example": "陈晓"
+              },
+              "phone": {
+                "type": "string",
+                "description": "已脱敏的联系电话。",
+                "example": "138****1234"
+              }
+            }
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC 时间，前端按用户时区展示。",
+            "readOnly": true
+          },
+          "remark": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 200,
+            "description": "null 表示未填写备注。"
+          }
+        }
+      },
+      "OrderPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "pageSize"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Order"
+            },
+            "description": "当前页订单；无数据返回空数组。"
+          },
+          "total": {
+            "type": "integer",
+            "description": "符合筛选条件的总记录数。",
+            "example": 42
+          },
+          "page": {
+            "type": "integer",
+            "example": 1,
+            "description": "当前页码，从 1 开始。"
+          },
+          "pageSize": {
+            "type": "integer",
+            "example": 20,
+            "description": "当前每页条数。"
+          }
+        }
+      },
+      "CreateOrder": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": [
+                "skuId",
+                "quantity"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "skuId": {
+                  "type": "string",
+                  "description": "选中商品的 SKU ID。"
+                },
+                "quantity": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 99,
+                  "description": "购买数量。"
+                }
+              }
+            }
+          },
+          "remark": {
+            "type": "string",
+            "maxLength": 200,
+            "description": "可选订单备注，未填写时省略。"
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "requestId"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "稳定的业务错误码，用于前端分支处理。",
+            "example": "ORDER_STATUS_CONFLICT"
+          },
+          "message": {
+            "type": "string",
+            "description": "可展示给用户的错误信息。",
+            "example": "订单已支付，无法取消"
+          },
+          "requestId": {
+            "type": "string",
+            "description": "反馈问题时提供给后端定位日志。",
+            "example": "req_demo_021"
+          }
+        }
+      }
+    }
+  }
+}

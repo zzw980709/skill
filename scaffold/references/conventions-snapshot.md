@@ -1,8 +1,9 @@
 # 约定快照模板
 
-第 0 步识别的结果，写下来供生成与复审引用。生成前填完以下字段；拿不准的标「❓假设」，在确认闸门时向用户确认。
+跨层或多模块任务可用此模板记录识别结果，供生成与复审引用。只填本次相关字段；附依据路径，未确定项标为假设，仅在影响正确性时向用户澄清。
 
 ```yaml
+evidence:            # 支撑关键约定的仓库文件路径
 language/runtime:    # e.g. Java 11 / Node 18 / Python 3.12
 template_set:        # e.g. java-springboot-ddd / node-ts-express / python-fastapi / go-gin（见 templates/README.md）
 framework:           # e.g. Spring Boot 2.7 + JPA / Express 4 + Prisma / FastAPI + SQLAlchemy

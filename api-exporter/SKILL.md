@@ -1,6 +1,6 @@
 ---
 name: api-exporter
-description: "Static-scan a Spring Boot project into an OpenAPI 3.0 document and import it into Apifox with the bundled api-exporter Rust CLI. Use when the user wants to 导出接口/生成接口文档/生成 OpenAPI、导出指定接口 or only a subset (by path / controller / tag / HTTP method / method name), 预览有哪些接口, 同步接口到 Apifox, 重新导入 apifox, or asks whether an endpoint exists in a Spring Boot backend."
+description: 静态扫描 Spring Boot Java 源码，列出或筛选端点、生成 OpenAPI 3.0 JSON，并按用户要求同步 Apifox。适用于导出全部或指定接口、查找后端端点及导入 Apifox；生成可阅读的 HTML 对接文档使用 api-doc-html。
 ---
 
 # api-exporter
@@ -32,7 +32,7 @@ BIN=<skill-dir>/tool/target/release/api-exporter
 "$BIN" --project <target-project> --list
 ```
 
-Prints `#  方法  路径  分组  处理器  摘要`. Every line is copy-pastable into `--include`.
+Prints `#  方法  路径  分组  处理器  摘要`. Copy only the method and path into `--include` (for example, `GET /user/{id}`), not the full table row.
 `--list` never writes files; combine it with filters to preview an export first.
 
 ## 3. Select the specified interfaces
@@ -59,14 +59,15 @@ Rules that bite:
 ## 4. Generate and verify
 
 ```bash
-"$BIN" --project <target-project> --profile dev \
+"$BIN" --project <target-project> --dry-run --profile dev \
   --include 'path:/order/**' --exclude 'http:DELETE' \
   --out /tmp/openapi.json
 ```
 
+- Always pass `--dry-run` for file-only generation: the CLI reads `APIFOX_TOKEN` and `APIFOX_PROJECT_ID` from the environment and otherwise may push automatically. This flag still writes the output file.
 - Default output: `<project>/build/apifox/openapi.json`; pass `--out` when the target repo must stay clean.
   `--out` takes a file path, or a directory (existing, or ending with `/`) to write `<dir>/openapi.json`; missing directories are created.
-- Read the summary block: `接口数量` is the count **after** filtering, plus `数据模型`, `context-path`, `servers`. Zero interfaces means the filters were wrong — go back to `--list`.
+- Read the summary block: `接口数量` is the count **after** filtering, plus `数据模型`, `context-path`, `servers`. Zero interfaces requires checking filters, source root and scanner support — go back to `--list`, and do not claim a complete export.
 - `context-path` / `port` are read from `src/main/resources/**/application{-profile}.*`; override with `--profile`, `--context-path`, `--port`, `--base-url`.
 - Verify the document before shipping:
 
@@ -78,21 +79,25 @@ It reports paths/operations/schemas and fails on dangling `$ref`, duplicate `ope
 
 ## 5. Push to Apifox
 
-Only when the user asked for Apifox (plain 生成/导出 means generate the file only):
+Only when the user asked for Apifox (plain 生成/导出 means generate the file only). First generate with `--dry-run`, verify that document and inspect the target project, filters and merge mode. Reuse those same export arguments for the push:
 
 ```bash
-APIFOX_TOKEN=... "$BIN" --project <target-project> \
+"$BIN" --project <target-project> --out /tmp/openapi.json \
+  --include 'path:/order/**' \
   --apifox-project <id> --apifox-mode AUTO_MERGE \
   [--apifox-folder <id>] [--apifox-branch <id>]
 ```
 
-- Token: `--apifox-token` or `$APIFOX_TOKEN`; project: `--apifox-project` or `$APIFOX_PROJECT_ID`. Both are required, otherwise it just writes the file.
+- Prefer an existing `$APIFOX_TOKEN`; do not echo credentials or place a real token in logged commands. Token: `--apifox-token` or `$APIFOX_TOKEN`; project: `--apifox-project` or `$APIFOX_PROJECT_ID`. Both are required, otherwise it just writes the file.
 - Modes: `AUTO_MERGE` (default, matches by method+path), `OVERWRITE_EXISTING`, `KEEP_EXISTING`, `CREATE_NEW`.
-- `--delete-unmatched` deletes remote endpoints/models missing from the scan — confirm with the user before using it.
+- `--delete-unmatched` deletes remote endpoints/models missing from the scan. Use only with explicit authorization for that deletion; a subset export can make unrelated remote endpoints look unmatched.
+- If a push fails, inspect the failure before retrying. Do not blindly repeat `CREATE_NEW` or destructive imports, which may duplicate or delete resources.
 - `--dry-run` skips the push but still writes the file.
 - Success: `[apifox] HTTP 200 | 新增接口 …`; failure: `[error] 推送失败: …` with the raw response body — usually a bad token, project id, or folder id.
 
 ## Gotchas
+
+- Static analysis is not runtime verification. Scanner limitations, parse failures and incomplete schemas must be disclosed; do not invent missing types or claim all runtime routes were found.
 
 - Nothing matched after filtering: path specs are exact — retry with `--list` and `'path:/prefix/**'`.
 - `ResponseEntity<Object>` and friends produce no response schema unless the method carries `@ApiResponse(response = X.class)` — expected, not a bug.

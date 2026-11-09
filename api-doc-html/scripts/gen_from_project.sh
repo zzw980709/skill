@@ -12,6 +12,7 @@ BASE_URL=""
 NOTE=""
 EXPORTER="${API_EXPORTER_BIN:-}"
 KEEP_OPENAPI=""
+ALL=0
 SRC_DIRS=()
 INCLUDES=()
 EXCLUDES=()
@@ -45,6 +46,11 @@ die() { echo "[error] $*" >&2; exit 1; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --project|--out|--title|--src|--profile|--base-url|--note|--exporter|--keep-openapi|--include|--exclude)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || die "$1 缺少参数值"
+      ;;
+  esac
+  case "$1" in
     --project) PROJECT="${2:-}"; shift 2 ;;
     --out) OUT="${2:-}"; shift 2 ;;
     --title) TITLE="${2:-}"; shift 2 ;;
@@ -56,7 +62,7 @@ while [[ $# -gt 0 ]]; do
     --keep-openapi) KEEP_OPENAPI="${2:-}"; shift 2 ;;
     --include) INCLUDES+=("${2:-}"); shift 2 ;;
     --exclude) EXCLUDES+=("${2:-}"); shift 2 ;;
-    --all) INCLUDES=(); shift ;;
+    --all) ALL=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数: $1（--help 查看用法）" ;;
   esac
@@ -64,6 +70,10 @@ done
 
 [[ -n "$PROJECT" ]] || die "缺少 --project"
 [[ -n "$OUT" ]] || die "缺少 --out"
+if [[ "$ALL" -eq 1 && ${#INCLUDES[@]} -gt 0 ]]; then
+  die "--all 与 --include 不能同时使用"
+fi
+[[ "$ALL" -eq 1 || ${#INCLUDES[@]} -gt 0 ]] || die "请指定 --include，或用 --all 明确导出全部接口"
 CALLER_PWD="$(pwd)"
 PROJECT="$(cd "$PROJECT" && pwd)" || die "项目目录不存在: $PROJECT"
 [[ "$OUT" = /* ]] || OUT="$CALLER_PWD/$OUT"
@@ -72,13 +82,14 @@ for i in "${!SRC_DIRS[@]}"; do
   [[ "${SRC_DIRS[$i]}" = /* ]] || SRC_DIRS[$i]="$CALLER_PWD/${SRC_DIRS[$i]}"
 done
 [[ -d "$PROJECT/src/main/java" ]] || die "$PROJECT 下找不到 src/main/java"
-[[ ${#INCLUDES[@]} -gt 0 ]] || echo "[warn] 未指定 --include，将导出全部接口（可能较慢、文档较大）" >&2
 
 if [[ -z "$EXPORTER" ]]; then
   for candidate in \
+    "$SKILL_DIR/../api-exporter/tool/target/release/api-exporter" \
+    "$HOME/.codex/skills/api-exporter/tool/target/release/api-exporter" \
+    "$HOME/.claude/skills/api-exporter/tool/target/release/api-exporter" \
     "$HOME/.agents/skills/api-exporter/tool/target/release/api-exporter" \
-    "$HOME/.config/opencode/skills/api-exporter/tool/target/release/api-exporter" \
-    "$SKILL_DIR/../api-exporter/tool/target/release/api-exporter"; do
+    "$HOME/.config/opencode/skills/api-exporter/tool/target/release/api-exporter"; do
     if [[ -x "$candidate" ]]; then EXPORTER="$candidate"; break; fi
   done
 fi
@@ -91,7 +102,7 @@ TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/api-doc-html.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
 OPENAPI_JSON="$TMP_DIR/openapi.json"
 
-EXPORT_ARGS=(--project "$PROJECT" --out "$OPENAPI_JSON")
+EXPORT_ARGS=(--project "$PROJECT" --out "$OPENAPI_JSON" --dry-run)
 [[ -n "$PROFILE" ]] && EXPORT_ARGS+=(--profile "$PROFILE")
 if [[ ${#INCLUDES[@]} -gt 0 ]]; then
   for spec in "${INCLUDES[@]}"; do EXPORT_ARGS+=(--include "$spec"); done
