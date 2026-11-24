@@ -2,7 +2,7 @@
 
 `gen_api_doc.py --config <file>.json` 的完整字段。相对路径以配置文件所在目录为基准。
 
-> 单模块、无需 `fieldDocs`/`enums` 时，可跳过本文件，直接用 `scripts/gen_from_project.sh` 一条命令完成扫描 + 生成。
+> 单模块、无需 `fieldDocs`/`enums` 时，可跳过本文件，直接用 `scripts/gen_from_project.sh` 一条命令完成扫描 + 生成；生产基线用 `--base pro`。
 
 ## 最小示例
 
@@ -25,6 +25,8 @@
 | `out` | 否 | 输出 HTML 路径，默认 `./api-doc.html` |
 | `srcRoots` | 否 | Java 源码根目录数组，用于提取 DTO 字段 Javadoc；可传多个仓库 |
 | `modules` | 是 | 模块数组，见下 |
+| `baselineLabel` | 否 | 变更基线显示名，默认「生产环境」；例如「生产环境 pro」 |
+| `baselineDate` | 否 | 基线日期，例如 `2026-11-18`；显示在变更摘要和接口页 |
 | `heroNotes` | 否 | 顶部说明的 HTML 片段数组（例如 Base URL、响应包装、日期格式） |
 | `paramDocs` | 否 | 参数名 → 说明，补充缺失描述；不再内置推测的业务含义 |
 | `fieldDocs` | 否 | `"SchemaName.prop": "说明"`，用于补 Javadoc 缺失的字段 |
@@ -36,6 +38,7 @@
 {
   "title": "商品模块（客户端）",
   "openapi": "orders.json",
+  "baseline": "orders.production.json",
   "note": "响应包装 {data}；按客户端账号传 user_id",
   "baseUrl": "http://localhost:8080/api"
 }
@@ -44,9 +47,30 @@
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `title` | 是 | 模块标题，同时用于侧栏分组与锚点（自动 slug） |
-| `openapi` | 是 | OpenAPI 3 JSON 路径 |
+| `openapi` | 是 | 当前 OpenAPI 3 JSON 路径 |
+| `baseline` | 否 | 上一版 OpenAPI 3 JSON 路径；用于生成「本次变更」。也可由 `gen_from_project.sh --base` 自动写入 |
 | `note` | 否 | 模块说明，显示在模块标题下 |
 | `baseUrl` | 否 | 覆盖 `servers[0].url`；用于复制按钮与模块头展示 |
+
+## 变更基线
+
+有三种取法，选一种即可：
+
+1. `gen_from_project.sh --base pro`：取版本最高的 `v*-backend` 生产 tag，导出旧代码契约后对比。
+2. `gen_from_project.sh --base <git-ref>`：对比指定分支、tag 或提交。
+3. `gen_from_project.sh --baseline <openapi.json>` 或配置 `modules[].baseline`：直接使用已有的旧 OpenAPI 文件。
+
+不传基线时生成完整文档，但没有「本次变更」视图。基线导出与当前导出使用相同的 `--include` / `--exclude` / `--profile`；基线没有接口时脚本会警告，当前范围按新增处理。
+
+变更对比覆盖：
+
+- 接口新增、移除、路径变化；
+- 参数新增、移除、类型、必填、枚举和常见约束变化；
+- 请求体字段新增、移除、类型、必填、约束变化；
+- 响应状态码新增、移除，响应字段新增、移除、类型、必填、约束变化；
+- 鉴权声明变化。
+
+说明文字变化不作为契约变更。删除接口、删除字段、类型变化、请求可选变必填、成功响应移除等会标记为破坏性变更。
 
 ## enums
 
@@ -88,7 +112,7 @@ python3 scripts/gen_api_doc.py \
   --src /repo/src/main/java
 ```
 
-命令行简易模式仅配置标题、输出、模块与源码目录；需要其它字段就用配置文件。
+命令行简易模式仅配置标题、输出、模块与源码目录；需要基线、字段补注或枚举时就用配置文件，或使用 `gen_from_project.sh`。
 
 ## 面向前端的对接说明
 
@@ -135,37 +159,32 @@ python3 scripts/gen_api_doc.py \
 推荐把模块专属说明放在模块内。同层 operationId 的优先级高于方法路径；同种键的模块说明覆盖顶层说明。
 `usage` / `notes` 均按纯文本渲染。
 
-完整示例见 [examples/doc-config.json](../examples/doc-config.json)，配套数据为虚构的订单 API。
+完整示例见 [examples/doc-config-v2.json](../examples/doc-config-v2.json)，配套数据为虚构的订单 API 与生产基线。
 
-## 示例与类型的边界
+## 契约展示边界
 
-- 示例优先取媒体类型的 `example` / `examples.value`，否则按 schema 的 example、default、enum 等生成，占位示例会明确标注来源。
-- 请求示例和类型过滤 `readOnly` 字段，响应过滤 `writeOnly`；保留合法的大写字段，不按命名猜测 Java 常量。
-- 字段表展示嵌套路径、必填、枚举、默认值、格式及常见约束。支持本地 `$ref`、`allOf`；联合结构主要通过 TypeScript 表示。
-- 递归和过深结构在类型中截断为 unknown，不代表可直接替代运行时校验或完整类型生成器。外部 `$ref` 需先打包到单文件；未解析引用会展示未知。
-- Fetch 是可复制的调用骨架，不在页面发请求。复杂查询序列化、非 JSON / multipart 请求体、OAuth 等特殊鉴权仍需按项目约定调整。
+- 字段表展示嵌套路径、必填、枚举、默认值、格式及常见约束。支持本地 `$ref`、`allOf`；联合结构主要展示类型摘要。
+- 请求字段过滤 `readOnly`，响应字段过滤 `writeOnly`；保留合法的大写字段，不按命名猜测 Java 常量。
+- 递归和过深结构会截断，不代表可直接替代运行时校验或完整类型生成器。外部 `$ref` 需先打包到单文件；未解析引用会展示未知。
+- 页面不生成 Fetch / TypeScript / 示例 JSON；前端按自己仓库的请求封装和类型约定实现。
 - 文档解析 OpenAPI 声明的 security，包括全局继承与接口级覆盖。未声明时显示待确认，不能从“缺失”推断匿名。
 - 旧的 `heroNotes` 保持 HTML 片段行为，只用于你自己维护的可信配置；新说明优先用纯文本 `integration`。
 - CSS / JS 源文件位于 `assets/`，生成时内联；最终 HTML 不依赖其它文件或网络资源，复制这一份即可交付。
-
 
 ## Agent 交接配置
 
 ```json
 "agent": {
-  "task": "将所选接口接入已有订单管理页面，沿用项目当前的请求和类型约定。",
-  "constraints": ["不新增重复请求层。"],
-  "acceptanceCriteria": ["所选接口字段、加载状态与错误分支按已确认约定处理。"]
+  "task": "把本次变更接入已有订单管理页面，沿用项目当前的请求和类型约定。"
 }
 ```
 
-三个字段均可选：`task` 为字符串，`constraints` 和 `acceptanceCriteria` 为字符串数组。
-没有配置时仍会生成「交给 Agent」模块；任务可在 HTML 内临时填写，不会修改源配置或上传资料。
-接口专属规则优先写 `operationDocs`；全局验收条件应适用于所有范围，或显式注明适用范围。
+`task` 可选；没有配置时仍会生成「交给 Agent」模块，任务可在 HTML 内临时填写，不会修改源配置或上传资料。
 
-- 范围包含全部接口、模块、完整调用流程或单接口；接口页的入口会预选当前接口。
-- Markdown 任务包可直接粘贴给前端 Agent，或下载 `.md`；JSON 契约包包含 `schemaVersion`、任务、接入约定、流程、枚举、模块内精确 OpenAPI 与待确认项。
+- 默认范围是「本次变更的接口」；也可选择全部、模块、调用流程或单接口。接口页的入口会预选当前接口。
+- Markdown 任务包可直接粘贴给前端 Agent，或下载 `.md`；JSON 契约包包含 `schemaVersion`、任务、变更清单、模块内精确 OpenAPI 与待确认项。
+- 任务包不包含通用编码约束、验收模板或项目接入约定；接收方 Agent 按其前端仓库规范执行。
 - 每个模块独立保留 OpenAPI，避免跨模块相同路径互相覆盖。只导出所选方法，并递归携带被引用的 components；路径级参数合并到接口参数，接口级覆盖仍生效。
-- 全局 security 与接口级覆盖保留原语义。未解析引用、未声明鉴权或错误响应、未填写任务等会进入待确认项；选择部分流程不会自动把剩余接口加入任务。
+- 全局 security 与接口级覆盖保留原语义。未解析引用、未声明鉴权或错误响应会进入待确认项。
 - 不注入生成示例或猜测字段。原始示例、说明可能包含业务数据，分享前应核对内容；模块不会读取本机令牌或发出业务请求。
-- 下载与复制均在浏览器本地完成，最终仍是一份离线 HTML。JSON 便于结构化读取，Markdown 则带有前端仓库适配与交付要求。
+- 下载与复制均在浏览器本地完成，最终仍是一份离线 HTML。

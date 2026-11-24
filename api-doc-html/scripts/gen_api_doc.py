@@ -21,18 +21,16 @@ from functools import lru_cache
 from html.parser import HTMLParser
 from pathlib import Path
 
-METHOD_ORDER = {"GET": 0, "POST": 1, "PUT": 2, "PATCH": 3, "DELETE": 4}
-
 CLASS_RE = re.compile(r"\b(?:class|enum)\s+(\w+)")
-JSON_PROP_RE = re.compile(r'@JsonProperty\(\s*(?:value\s*=\s*)?"([^"]+)"\s*\)')
+JSON_PROP_RE = re.compile(r"@JsonProperty\s*\(([^)]*)\)")
+JSON_PROP_VALUE_RE = re.compile(r'(?:value|name)\s*=\s*"([^"]+)"')
+JSON_PROP_BARE_RE = re.compile(r'^\s*"([^"]+)"')
 FIELD_RE = re.compile(r"(?:private|public|protected)\s+[^;=()]+?\s+(\w+)\s*(?:=|;)")
 DOC_OPEN_RE = re.compile(r"^\s*/\*\*")
 DOC_CLOSE_RE = re.compile(r"\*/\s*$")
 DOC_STAR_RE = re.compile(r"^\s*\*\s?")
 
-# 通用查询参数说明（可按需在配置里 paramDocs 覆盖/扩展）
 DEFAULT_PARAM_DOCS = {}  # 不从参数名推断业务语义。
-
 
 FIELD_DOCS = {}
 PARAM_DOCS = dict(DEFAULT_PARAM_DOCS)
@@ -43,6 +41,8 @@ OUT = Path("api-doc.html")
 HERO_NOTES = []
 ENUMS = []
 CONFIG = {}
+BASELINE_LABEL = "生产环境"
+BASELINE_DATE = ""
 
 
 # ------------------------------------------------------------------ 源码注释
@@ -58,6 +58,24 @@ def clean_doc(lines):
             continue
         out.append(line)
     return " ".join(out).strip()
+
+
+def _strip_java_literals(line):
+    line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+    line = re.sub(r"'(?:\\.|[^'\\])*'", "''", line)
+    return line.split('//', 1)[0]
+
+
+def _json_prop_name(text):
+    match = JSON_PROP_RE.search(text)
+    if not match:
+        return None
+    args = match.group(1)
+    value = JSON_PROP_VALUE_RE.search(args)
+    if value:
+        return value.group(1)
+    bare = JSON_PROP_BARE_RE.match(args)
+    return bare.group(1) if bare else None
 
 
 def extract_field_docs(src_roots, target_classes=None):
@@ -89,10 +107,14 @@ def extract_field_docs(src_roots, target_classes=None):
                         continue
                 elif not any(needle in text for needle in needles):
                     continue
-            current_class = None
+            class_stack = []  # (class name, brace depth at class body)
+            depth = 0
+            pending_class = None
             pending_doc = None
             pending_json = None
+            json_buffer = None
             in_doc = False
+            in_block = False
             doc_lines = []
             for raw in text.splitlines():
                 line = raw.strip()
@@ -109,22 +131,50 @@ def extract_field_docs(src_roots, target_classes=None):
                         in_doc = True
                         doc_lines = [line]
                     continue
-                m = CLASS_RE.search(line)
-                if m:
-                    current_class = m.group(1)
-                    docs.setdefault(current_class, {})
+                if in_block:
+                    if "*/" in line:
+                        in_block = False
+                    continue
+                if line.startswith("/*"):
+                    if "*/" not in line:
+                        in_block = True
+                    continue
+                if json_buffer is not None:
+                    json_buffer += " " + line
+                    if ")" in line:
+                        pending_json = _json_prop_name(json_buffer)
+                        json_buffer = None
+                    continue
+                if "@JsonProperty" in line:
+                    pending_json = None
+                    if ")" in line:
+                        pending_json = _json_prop_name(line)
+                    elif "(" in line:
+                        json_buffer = line
+                    continue
+
+                code = _strip_java_literals(line)
+                class_match = CLASS_RE.search(code)
+                before = depth
+                depth += code.count("{") - code.count("}")
+                if class_match:
+                    pending_class = class_match.group(1)
+                    docs.setdefault(pending_class, {})
+                if pending_class and "{" in code:
+                    class_stack.append((pending_class, before + 1))
+                    pending_class = None
                     pending_doc = None
                     pending_json = None
+                while class_stack and depth < class_stack[-1][1]:
+                    class_stack.pop()
+                if class_match:
                     continue
-                m = JSON_PROP_RE.search(line)
-                if m:
-                    pending_json = m.group(1)
-                    continue
-                m = FIELD_RE.match(line)
-                if m and current_class:
-                    prop = pending_json or m.group(1)
+
+                field_match = FIELD_RE.match(code)
+                if field_match and class_stack:
+                    prop = pending_json or field_match.group(1)
                     if pending_doc:
-                        docs[current_class].setdefault(prop, pending_doc)
+                        docs[class_stack[-1][0]].setdefault(prop, pending_doc)
                     pending_doc = None
                     pending_json = None
     return docs
@@ -152,14 +202,11 @@ def field_desc(schema_name, prop):
 HTTP_METHODS = {'get', 'post', 'put', 'patch', 'delete', 'head', 'options', 'trace'}
 ASSETS = Path(__file__).resolve().parents[1] / 'assets'
 MISSING = object()
+LOCATION_LABELS = {'path': '路径', 'query': '查询', 'header': '请求头', 'cookie': 'Cookie'}
 
 
 def esc(value):
     return html.escape(str(value), quote=True)
-
-
-def pretty(value):
-    return json.dumps(value, ensure_ascii=False, indent=2)
 
 
 def resolve(node, doc):
@@ -192,7 +239,6 @@ def shape(schema, doc, depth=0, seen=()):
         return node
     merged = {k: v for k, v in node.items() if k != 'allOf'}
     props, required = dict(merged.get('properties', {})), list(merged.get('required', []))
-    # allOf composition can be recursive; avoid expanding a self-referential member.
     for part in node['allOf']:
         part = shape(part, doc, depth + 1, seen)
         props.update(part.get('properties', {}))
@@ -217,51 +263,6 @@ def schema_type(schema, doc):
     return 'file' if node.get('format') == 'binary' else typ
 
 
-def sample(schema, doc, direction='response', depth=0, seen=()):
-    if depth > 7:
-        return None
-    ref = schema.get('$ref') if isinstance(schema, dict) else None
-    if ref and ref in seen:
-        return None
-    seen = seen + ((ref,) if ref else ())
-    node = shape(schema, doc)
-    for key in ('example', 'default', 'const'):
-        if key in node:
-            return node[key]
-    if node.get('examples') and isinstance(node['examples'], list):
-        return node['examples'][0]
-    if node.get('enum'):
-        return node['enum'][0]
-    for union in ('oneOf', 'anyOf'):
-        if node.get(union):
-            return sample(node[union][0], doc, direction, depth + 1, seen)
-    typ = node.get('type')
-    if typ == 'array':
-        return [sample(node.get('items', {}), doc, direction, depth + 1, seen)]
-    if typ == 'object' or 'properties' in node:
-        return {key: sample(value, doc, direction, depth + 1, seen)
-                for key, value in node.get('properties', {}).items()
-                if not shape(value, doc).get('readOnly' if direction == 'request' else 'writeOnly')}
-    if typ in ('integer', 'number'):
-        return node.get('minimum', 0)
-    if typ == 'boolean':
-        return True
-    if typ == 'null' or 'x-unresolved' in node:
-        return None
-    return {'date': '2026-01-01', 'date-time': '2026-01-01T00:00:00Z',
-            'email': 'user@example.com', 'binary': '<file>'}.get(node.get('format'), 'string')
-
-
-def media_example(media, doc, direction):
-    if 'example' in media:
-        return media['example'], '接口提供的示例'
-    for entry in (media.get('examples') or {}).values():
-        entry = resolve(entry, doc)
-        if 'value' in entry:
-            return entry['value'], '接口提供的示例'
-    return sample(media.get('schema', {}), doc, direction), '按 Schema 生成 · 请替换占位值'
-
-
 def constraints(node):
     bits = []
     if 'enum' in node:
@@ -280,76 +281,25 @@ def constraints(node):
         if node.get(key):
             bits.append(label)
     if node.get('oneOf') or node.get('anyOf'):
-        bits.append('联合结构，见 TypeScript')
+        bits.append('联合结构')
     return bits
 
 
-def ts_type(schema, doc, direction, depth=0, seen=()):
-    ref = schema.get('$ref') if isinstance(schema, dict) else None
-    if depth > 10 or (ref and ref in seen):
-        return 'unknown /* recursive */'
-    seen = seen + ((ref,) if ref else ())
-    node = resolve(schema, doc)
-    if 'x-unresolved' in node:
-        return 'unknown /* unresolved reference */'
-    for union, sep in [('oneOf', ' | '), ('anyOf', ' | '), ('allOf', ' & ')]:
-        if node.get(union):
-            base = {k: v for k, v in node.items() if k != union}
-            members = [ts_type(s, doc, direction, depth + 1, seen) for s in node[union]]
-            if base.get('properties'):
-                members.append(ts_type(base, doc, direction, depth + 1, seen))
-            result = '(' + sep.join(members) + ')'
-            return result + (' | null' if node.get('nullable') else '')
-    if 'enum' in node:
-        result = ' | '.join(json.dumps(v, ensure_ascii=False) for v in node['enum']) or 'never'
-    elif 'const' in node:
-        result = json.dumps(node['const'], ensure_ascii=False)
-    elif node.get('type') == 'array':
-        result = 'Array<' + ts_type(node.get('items', {}), doc, direction, depth + 1, seen) + '>'
-    elif node.get('type') == 'object' or 'properties' in node:
-        rows = []
-        for key, value in node.get('properties', {}).items():
-            v = shape(value, doc)
-            if v.get('readOnly' if direction == 'request' else 'writeOnly'):
-                continue
-            desc = v.get('description', '').replace('*/', '* /').replace('\n', ' ')
-            if desc:
-                rows.append('  /** ' + desc + ' */')
-            optional = '' if key in node.get('required', []) else '?'
-            rows.append('  ' + json.dumps(key, ensure_ascii=False) + optional + ': ' +
-                        ts_type(value, doc, direction, depth + 1, seen).replace('\n', '\n  ') + ';')
-        additional = node.get('additionalProperties', MISSING)
-        if not rows:
-            value = ts_type(additional, doc, direction, depth + 1, seen) if isinstance(additional, dict) else 'unknown'
-            result = 'Record<string, ' + ('never' if additional is False else value) + '>'
-        else:
-            # Named properties may differ from additionalProperties; unknown avoids an invalid index signature.
-            if additional is not False:
-                rows.append('  [key: string]: unknown;')
-            result = '{\n' + '\n'.join(rows) + '\n}'
-    else:
-        types = node.get('type', 'unknown')
-        result = ' | '.join({'integer': 'number', 'number': 'number', 'string': 'string',
-                             'boolean': 'boolean', 'null': 'null'}.get(t, 'unknown')
-                            for t in (types if isinstance(types, list) else [types]))
-        if node.get('format') == 'binary':
-            result = 'Blob'
-    if node.get('nullable') and 'null' not in result.split(' | '):
-        result += ' | null'
-    return result
-
-
-def contract_rows(schema, doc, direction, prefix='', depth=0, seen=(), schema_name=''):
+def contract_rows(schema, doc, direction, prefix='', depth=0, seen=(), schema_name='',
+                  change_fields=None, scope=''):
     ref = schema.get('$ref') if isinstance(schema, dict) else None
     if depth > 6 or (ref and ref in seen):
-        return '<tr><td colspan="4" class="muted">递归或深层结构，请结合 TypeScript 查看。</td></tr>'
+        return '<tr><td colspan="4" class="muted">递归或深层结构，请结合原始契约查看。</td></tr>'
     seen = seen + ((ref,) if ref else ())
     if ref:
         schema_name = ref.split('/')[-1]
     node = shape(schema, doc)
     if node.get('type') == 'array':
-        return contract_rows(node.get('items', {}), doc, direction, prefix + '[]', depth + 1, seen, schema_name)
+        return contract_rows(node.get('items', {}), doc, direction, prefix + '[]', depth + 1, seen,
+                             schema_name, change_fields, scope)
     rows = []
+    area = '请求' if direction == 'request' else '响应'
+    marks = change_fields or {}
     for key, value in node.get('properties', {}).items():
         v = shape(value, doc)
         if v.get('readOnly' if direction == 'request' else 'writeOnly'):
@@ -357,38 +307,59 @@ def contract_rows(schema, doc, direction, prefix='', depth=0, seen=(), schema_na
         path = prefix + ('.' if prefix else '') + key
         desc = field_desc(schema_name, key) or v.get('description', '')
         required = key in node.get('required', [])
+        change = marks.get((area, scope, path))
+        row_class = ''
+        cell_badge = ''
+        if change:
+            row_class = ' class="row-' + ('added' if change['kind'] == 'added' else 'changed') + '"'
+            badge_class = 'add' if change['kind'] == 'added' else 'mod'
+            badge_text = '新增' if change['kind'] == 'added' else '变更'
+            cell_badge = f'<span class="cell-badge {badge_class}">{badge_text}</span>'
         chips = ''.join(f'<span>{esc(c)}</span>' for c in constraints(v))
-        rows.append(f'<tr><td><code>{esc(path)}</code></td><td><code class="type">{esc(schema_type(value, doc))}</code></td>'
-                    f'<td><span class="{"required" if required else "optional"}">{"必填" if required else "可选"}</span></td>'
-                    f'<td>{esc(desc) if desc else "<span class=muted>暂无说明</span>"}<div class="constraints">{chips}</div></td></tr>')
+        rows.append(f'<tr{row_class}><td><code>{esc(path)}</code></td>'
+                    f'<td><code class="type">{esc(schema_type(value, doc))}</code></td>'
+                    f'<td><span class="{"req" if required else "opt"}">{"必填" if required else "可选"}</span></td>'
+                    f'<td>{esc(desc) if desc else "<span class=muted>暂无说明</span>"}{cell_badge}'
+                    f'<div class="chips">{chips}</div></td></tr>')
         if v.get('properties') or v.get('type') == 'array':
-            rows.append(contract_rows(value, doc, direction, path, depth + 1, seen, schema_name))
+            rows.append(contract_rows(value, doc, direction, path, depth + 1, seen,
+                                      schema_name, change_fields, scope))
     return ''.join(rows)
 
 
-def field_table(schema, doc, direction):
-    rows = contract_rows(schema, doc, direction)
+def field_table(schema, doc, direction, change_fields=None, scope=''):
+    rows = contract_rows(schema, doc, direction, change_fields=change_fields, scope=scope)
     if not rows:
-        return f'<p class="empty-inline">类型 <code>{esc(schema_type(schema, doc))}</code>，具体结构见示例与 TypeScript。</p>'
-    return ('<div class="table-scroll"><table><thead><tr><th>字段路径</th><th>类型</th><th>必填</th>'
+        return f'<p class="empty-inline">类型 <code>{esc(schema_type(schema, doc))}</code>，未声明可展开字段；以原始契约为准。</p>'
+    return ('<div class="table-wrap"><table><thead><tr><th>字段路径</th><th>类型</th><th>必填</th>'
             '<th>说明 / 约束</th></tr></thead><tbody>' + rows + '</tbody></table></div>')
 
 
-def parameter_table(params, doc):
+def parameter_table(params, doc, change_fields=None):
     if not params:
         return '<p class="empty-inline">未声明路径、查询或请求头参数。</p>'
     rows = []
+    marks = change_fields or {}
     for p in params:
         sch = shape(p.get('schema', {}), doc)
         desc = p.get('description') or PARAM_DOCS.get(p.get('name'), '')
+        location = p.get('in', '')
+        change = marks.get(('请求', '', f'{location}.{p.get("name", "")}'))
+        row_class = ''
+        cell_badge = ''
+        if change:
+            row_class = ' class="row-' + ('added' if change['kind'] == 'added' else 'changed') + '"'
+            badge_class = 'add' if change['kind'] == 'added' else 'mod'
+            badge_text = '新增' if change['kind'] == 'added' else '变更'
+            cell_badge = f'<span class="cell-badge {badge_class}">{badge_text}</span>'
         chips = ''.join(f'<span>{esc(c)}</span>' for c in constraints(sch))
-        rows.append(f'<tr><td><code>{esc(p.get("name", ""))}</code><small>{esc(p.get("in", ""))}</small></td>'
+        rows.append(f'<tr{row_class}><td><code>{esc(p.get("name", ""))}</code><small>{esc(location)}</small></td>'
                     f'<td><code class="type">{esc(schema_type(sch, doc))}</code></td>'
-                    f'<td><span class="{"required" if p.get("required") or p.get("in") == "path" else "optional"}">'
-                    f'{"必填" if p.get("required") or p.get("in") == "path" else "可选"}</span></td>'
-                    f'<td>{esc(desc) if desc else "<span class=muted>暂无说明</span>"}'
-                    f'<div class="constraints">{chips}</div></td></tr>')
-    return '<div class="table-scroll"><table><thead><tr><th>参数 / 位置</th><th>类型</th><th>必填</th><th>说明 / 约束</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>'
+                    f'<td><span class="{"req" if p.get("required") or location == "path" else "opt"}">'
+                    f'{"必填" if p.get("required") or location == "path" else "可选"}</span></td>'
+                    f'<td>{esc(desc) if desc else "<span class=muted>暂无说明</span>"}{cell_badge}'
+                    f'<div class="chips">{chips}</div></td></tr>')
+    return '<div class="table-wrap"><table><thead><tr><th>参数 / 位置</th><th>类型</th><th>必填</th><th>说明 / 约束</th></tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div>'
 
 
 def auth_text(op, doc):
@@ -411,31 +382,38 @@ def auth_text(op, doc):
     return '需鉴权', ' 或 '.join(choices)
 
 
+def iter_module_operations(module):
+    doc = load_openapi(module['openapi'])
+    base = module.get('baseUrl', (doc.get('servers') or [{'url': ''}])[0].get('url', ''))
+    for path, item in doc.get('paths', {}).items():
+        item = resolve(item, doc)
+        for method, raw in item.items():
+            if method.lower() not in HTTP_METHODS or not isinstance(raw, dict):
+                continue
+            op = resolve(raw, doc)
+            params = {}
+            for raw_param in item.get('parameters', []) + op.get('parameters', []):
+                p = resolve(raw_param, doc)
+                params[(p.get('name'), p.get('in'))] = p
+            yield dict(module=module, doc=doc, base=base, path=path,
+                       method=method.upper(), op=op, params=list(params.values()),
+                       changes=[], change_status=None, breaking=False)
+
+
 def collect_operations():
     records = []
     for index, module in enumerate(MODULES):
-        doc = load_openapi(module['openapi'])
-        base = module.get('baseUrl', (doc.get('servers') or [{'url': ''}])[0].get('url', ''))
-        for path, item in doc.get('paths', {}).items():
-            item = resolve(item, doc)
-            for method, raw in item.items():
-                if method.lower() not in HTTP_METHODS or not isinstance(raw, dict):
-                    continue
-                op = resolve(raw, doc)
-                key = method.upper() + ' ' + path
-                params = {}
-                for raw_param in item.get('parameters', []) + op.get('parameters', []):
-                    p = resolve(raw_param, doc)
-                    params[(p.get('name'), p.get('in'))] = p
-                hints = {**CONFIG.get('operationDocs', {}).get(key, {}),
-                         **module.get('operationDocs', {}).get(key, {})}
-                if op.get('operationId'):
-                    hints.update(CONFIG.get('operationDocs', {}).get(op['operationId'], {}))
-                    hints.update(module.get('operationDocs', {}).get(op['operationId'], {}))
-                identity = f'{index}:{key}'
-                anchor = 'ep-' + hashlib.sha256(identity.encode()).hexdigest()[:12]
-                records.append(dict(id=anchor, module=module, doc=doc, base=base, path=path,
-                                    method=method.upper(), op=op, params=list(params.values()), hints=hints))
+        for rec in iter_module_operations(module):
+            key = rec['method'] + ' ' + rec['path']
+            hints = {**CONFIG.get('operationDocs', {}).get(key, {}),
+                     **module.get('operationDocs', {}).get(key, {})}
+            if rec['op'].get('operationId'):
+                hints.update(CONFIG.get('operationDocs', {}).get(rec['op']['operationId'], {}))
+                hints.update(module.get('operationDocs', {}).get(rec['op']['operationId'], {}))
+            identity = f'{index}:{key}'
+            rec['id'] = 'ep-' + hashlib.sha256(identity.encode()).hexdigest()[:12]
+            rec['hints'] = hints
+            records.append(rec)
     return records
 
 
@@ -460,10 +438,683 @@ def search_contract(node, doc):
     return ' '.join(words).lower()
 
 
-def handoff_data(records):
-    """Keep exact contracts separate from task instructions and business annotations."""
+# ------------------------------------------------------------------ contract diff
+
+def change(area, kind, field, before, after, text='', breaking=False, scope=''):
+    return {'area': area, 'kind': kind, 'field': field, 'before': before, 'after': after,
+            'text': text, 'breaking': breaking, 'scope': scope}
+
+
+def field_sig(field):
+    parts = [field['type'], '必填' if field['required'] else '可选']
+    if field['constraints']:
+        parts.append('、'.join(field['constraints']))
+    return '，'.join(parts)
+
+
+def flatten_fields(schema, doc, direction, prefix='', depth=0, seen=()):
+    ref = schema.get('$ref') if isinstance(schema, dict) else None
+    if depth > 8 or (ref and ref in seen):
+        return {}
+    seen = seen + ((ref,) if ref else ())
+    node = shape(schema, doc)
+    if node.get('type') == 'array':
+        return flatten_fields(node.get('items', {}), doc, direction, prefix + '[]', depth + 1, seen)
+    fields = {}
+    for key, value in node.get('properties', {}).items():
+        v = shape(value, doc)
+        if v.get('readOnly' if direction == 'request' else 'writeOnly'):
+            continue
+        path = prefix + ('.' if prefix else '') + key
+        fields[path] = {
+            'type': schema_type(value, doc),
+            'required': key in node.get('required', []),
+            'constraints': tuple(constraints(v)),
+        }
+        if v.get('properties') or v.get('type') == 'array':
+            fields.update(flatten_fields(value, doc, direction, path, depth + 1, seen))
+    return fields
+
+
+def parameter_map(params, doc):
+    out = {}
+    for p in params:
+        location = p.get('in', '')
+        name = p.get('name', '')
+        sch = shape(p.get('schema', {}), doc)
+        out[(location, name)] = {
+            'type': schema_type(sch, doc),
+            'required': bool(p.get('required') or location == 'path'),
+            'constraints': tuple(constraints(sch)),
+        }
+    return out
+
+
+def operation_signature(rec):
+    op, doc = rec['op'], rec['doc']
+    body = resolve(op.get('requestBody', {}), doc)
+    responses = {}
+    for code, raw in (op.get('responses') or {}).items():
+        resp = resolve(raw, doc)
+        responses[str(code)] = {
+            'description': resp.get('description', ''),
+            'content': {ctype: flatten_fields(media.get('schema', {}), doc, 'response')
+                        for ctype, media in (resp.get('content') or {}).items()},
+        }
+    return {
+        'path': rec['path'],
+        'auth': auth_text(op, doc),
+        'params': parameter_map(rec['params'], doc),
+        'body_required': bool(body.get('required')),
+        'body': {ctype: flatten_fields(media.get('schema', {}), doc, 'request')
+                 for ctype, media in (body.get('content') or {}).items()},
+        'responses': responses,
+    }
+
+
+def diff_fields(before, after, area, scope=''):
+    rows = []
+    for path in sorted(set(after) - set(before)):
+        f = after[path]
+        rows.append(change(area, 'added', path, '—', field_sig(f), '新增字段', scope=scope))
+    for path in sorted(set(before) - set(after)):
+        f = before[path]
+        rows.append(change(area, 'removed', path, field_sig(f), '—', '移除字段', True, scope=scope))
+    for path in sorted(set(before) & set(after)):
+        b, a = before[path], after[path]
+        bits = []
+        if b['type'] != a['type']:
+            bits.append(f'类型 {b["type"]} → {a["type"]}')
+        if b['required'] != a['required']:
+            bits.append('必填变化')
+        if b['constraints'] != a['constraints']:
+            bits.append('约束变更')
+        if bits:
+            rows.append(change(area, 'changed', path, field_sig(b), field_sig(a),
+                               '；'.join(bits), b['type'] != a['type'] or b['required'] != a['required'],
+                               scope=scope))
+    return rows
+
+
+def diff_params(before, after):
+    rows = []
+    for key in sorted(set(after) - set(before)):
+        p = after[key]
+        label = LOCATION_LABELS.get(key[0], key[0])
+        rows.append(change('请求', 'added', f'{key[0]}.{key[1]}', '—', field_sig(p),
+                           f'新增{label}参数'))
+    for key in sorted(set(before) - set(after)):
+        p = before[key]
+        label = LOCATION_LABELS.get(key[0], key[0])
+        rows.append(change('请求', 'removed', f'{key[0]}.{key[1]}', field_sig(p), '—',
+                           f'移除{label}参数', True))
+    for key in sorted(set(before) & set(after)):
+        b, a = before[key], after[key]
+        bits = []
+        if b['type'] != a['type']:
+            bits.append(f'类型 {b["type"]} → {a["type"]}')
+        if b['required'] != a['required']:
+            bits.append('必填变化')
+        if b['constraints'] != a['constraints']:
+            bits.append('约束变更')
+        if bits:
+            rows.append(change('请求', 'changed', f'{key[0]}.{key[1]}', field_sig(b), field_sig(a),
+                               '；'.join(bits), b['type'] != a['type'] or b['required'] != a['required']))
+    return rows
+
+
+def diff_body(before, after):
+    rows = []
+    if before['body_required'] != after['body_required']:
+        rows.append(change('请求', 'changed', 'requestBody',
+                           '必填' if before['body_required'] else '可选',
+                           '必填' if after['body_required'] else '可选',
+                           '请求体必填变化', not before['body_required'] and after['body_required']))
+    for ctype in sorted(set(after['body']) - set(before['body'])):
+        rows.append(change('请求', 'added', ctype, '—', ctype, '新增请求体类型'))
+        rows.extend(diff_fields({}, after['body'][ctype], '请求'))
+    for ctype in sorted(set(before['body']) - set(after['body'])):
+        rows.append(change('请求', 'removed', ctype, ctype, '—', '移除请求体类型', True))
+    for ctype in sorted(set(before['body']) & set(after['body'])):
+        rows.extend(diff_fields(before['body'][ctype], after['body'][ctype], '请求'))
+    return rows
+
+
+def diff_responses(before, after):
+    rows = []
+    for code in sorted(set(after) - set(before)):
+        desc = after[code]['description']
+        rows.append(change('响应', 'added', code, '—', desc or '已声明', '新增响应'))
+        for ctype, fields in after[code]['content'].items():
+            rows.append(change('响应', 'added', f'{code} {ctype}', '—', ctype, '新增响应内容类型'))
+            rows.extend(diff_fields({}, fields, '响应', code))
+    for code in sorted(set(before) - set(after)):
+        desc = before[code]['description']
+        rows.append(change('响应', 'removed', code, desc or '已声明', '—', '移除响应', True))
+    for code in sorted(set(before) & set(after)):
+        b, a = before[code], after[code]
+        for ctype in sorted(set(a['content']) - set(b['content'])):
+            rows.append(change('响应', 'added', f'{code} {ctype}', '—', ctype, '新增响应内容类型'))
+            rows.extend(diff_fields({}, a['content'][ctype], '响应', code))
+        for ctype in sorted(set(b['content']) - set(a['content'])):
+            rows.append(change('响应', 'removed', f'{code} {ctype}', ctype, '—', '移除响应内容类型', True))
+        for ctype in sorted(set(b['content']) & set(a['content'])):
+            rows.extend(diff_fields(b['content'][ctype], a['content'][ctype], '响应', code))
+    return rows
+
+
+def diff_operations(before, after):
+    b, a = operation_signature(before), operation_signature(after)
+    rows = []
+    if b['path'] != a['path']:
+        rows.append(change('接口', 'changed', 'path', b['path'], a['path'], '路径变更', True))
+    if b['auth'] != a['auth']:
+        rows.append(change('鉴权', 'changed', 'security', b['auth'][0], a['auth'][0], '鉴权变更', True))
+    rows.extend(diff_params(b['params'], a['params']))
+    rows.extend(diff_body(b, a))
+    rows.extend(diff_responses(b['responses'], a['responses']))
+    return rows
+
+
+def compute_diffs(records):
+    summary = {'has_baseline': False, 'added': 0, 'modified': 0, 'removed': 0,
+               'breaking': 0, 'total': 0, 'modules': []}
+    for module in MODULES:
+        current = [r for r in records if r['module'] is module]
+        entry = {'module': module, 'baseline': bool(module.get('baseline')),
+                 'added': [], 'modified': [], 'removed': [], 'unchanged': 0}
+        summary['modules'].append(entry)
+        if not module.get('baseline'):
+            continue
+        try:
+            base_records = list(iter_module_operations({**module, 'openapi': module['baseline']}))
+        except (OSError, ValueError, KeyError, TypeError) as err:
+            print(f"[warn] 无法读取基线契约 {module['baseline']}: {err}", file=sys.stderr)
+            entry['baseline'] = False
+            continue
+        summary['has_baseline'] = True
+        by_id, by_path = {}, {}
+        for br in base_records:
+            oid = br['op'].get('operationId')
+            if oid:
+                by_id.setdefault(oid, []).append(br)
+            by_path.setdefault((br['method'], br['path']), []).append(br)
+        used = set()
+        for rec in current:
+            oid = rec['op'].get('operationId')
+            match = None
+            if oid and len(by_id.get(oid, [])) == 1:
+                match = by_id[oid][0]
+            else:
+                candidates = by_path.get((rec['method'], rec['path']), [])
+                if len(candidates) == 1:
+                    match = candidates[0]
+            if not match:
+                rec['change_status'] = 'added'
+                entry['added'].append(rec)
+                continue
+            used.add(id(match))
+            rows = diff_operations(match, rec)
+            if rows:
+                rec['change_status'] = 'modified'
+                rec['changes'] = rows
+                rec['breaking'] = any(row['breaking'] for row in rows)
+                entry['modified'].append(rec)
+            else:
+                entry['unchanged'] += 1
+        for br in base_records:
+            if id(br) not in used:
+                br['change_status'] = 'removed'
+                br['breaking'] = True
+                summary_text = br['op'].get('summary') or br['op'].get('operationId') or br['path']
+                br['changes'] = [change('接口', 'removed', f'{br["method"]} {br["path"]}',
+                                        summary_text, '—', '接口已移除', True)]
+                entry['removed'].append(br)
+        summary['added'] += len(entry['added'])
+        summary['modified'] += len(entry['modified'])
+        summary['removed'] += len(entry['removed'])
+        summary['breaking'] += sum(1 for r in entry['modified'] if r.get('breaking')) + len(entry['removed'])
+    summary['total'] = summary['added'] + summary['modified'] + summary['removed']
+    return summary
+
+
+# ------------------------------------------------------------------ render helpers
+
+def badge_for(rec):
+    status = rec.get('change_status')
+    if status == 'added':
+        return '<span class="badge added">新增</span>'
+    if status == 'modified':
+        out = '<span class="badge modified">修改</span>'
+        if rec.get('breaking'):
+            out += '<span class="badge breaking">破坏性</span>'
+        return out
+    if status == 'removed':
+        return '<span class="badge removed">移除</span><span class="badge breaking">破坏性</span>'
+    return ''
+
+
+def change_mark(kind):
+    return {'added': '+', 'removed': '−', 'changed': '~'}.get(kind, '~')
+
+
+def change_field(change_item):
+    scope = change_item.get('scope') or ''
+    field = change_item.get('field', '')
+    return (scope + ' ' + field).strip() if scope else field
+
+
+def render_change_item(item, compact=False):
+    kind = item['kind']
+    field = change_field(item)
+    before = item.get('before', '')
+    after = item.get('after', '')
+    text = item.get('text', '')
+    if compact:
+        return (f'<div class="diff-item {kind}"><span class="mark">{change_mark(kind)}</span>'
+                f'<div><code>{esc(field)}</code>'
+                f'<p><span class="inline-old">{esc(before)}</span> → <span class="inline-new">{esc(after)}</span></p>'
+                f'<small>{esc(text)}</small></div></div>')
+    return (f'<li class="diff-item {kind}"><span class="mark">{change_mark(kind)}</span>'
+            f'<div><code>{esc(field)}</code><p>{esc(before)} → {esc(after)}</p>'
+            f'<small>{esc(text)}</small></div></li>')
+
+
+def change_counts(changes):
+    counts = {'请求': 0, '响应': 0, '接口': 0, '鉴权': 0}
+    for item in changes:
+        counts[item['area']] = counts.get(item['area'], 0) + 1
+    return counts
+
+
+def render_change_card(rec, link=True):
+    status = rec.get('change_status')
+    summary = rec['op'].get('summary') or rec['op'].get('operationId') or rec['path']
+    method = rec['method']
+    path = rec['path']
+    title_link = f'<a class="change-link" href="#{rec["id"]}">查看契约 ↗</a>' if link and status != 'removed' else ''
+    if status == 'removed':
+        body = ('<div class="change-cols"><div class="change-col"><div class="change-col-title">影响</div>'
+                '<ul class="diff-list"><li class="diff-item removed"><span class="mark">−</span>'
+                '<div><p>生产环境存在，当前版本已移除。</p><small>前端需删除相关入口、调用与错误处理。</small></div></li></ul>'
+                '</div></div>')
+        return (f'<article class="change-card removed"><div class="change-head"><div class="change-title">'
+                f'<span class="method {method.lower()}">{method}</span><code>{esc(path)}</code>'
+                f'<strong>{esc(summary)}</strong>{badge_for(rec)}</div><span class="change-link muted">当前版本已移除</span></div>'
+                f'{body}</article>')
+    counts = change_counts(rec.get('changes', []))
+    if status == 'added':
+        body = ('<div class="change-cols"><div class="change-col"><div class="change-col-title">本次新增</div>'
+                '<ul class="diff-list"><li class="diff-item added"><span class="mark">+</span>'
+                '<div><p>生产环境不存在此接口。</p><small>按最新契约接入，不影响已有调用。</small></div></li></ul>'
+                '</div></div>')
+    else:
+        request_items = [c for c in rec.get('changes', []) if c['area'] == '请求']
+        response_items = [c for c in rec.get('changes', []) if c['area'] in ('响应', '接口', '鉴权')]
+        body = ('<div class="change-cols">'
+                f'<div class="change-col"><div class="change-col-title">请求 <span>{len(request_items)}</span></div>'
+                f'<ul class="diff-list">{"".join(render_change_item(c, True) for c in request_items) or "<li class=muted>无请求变化</li>"}</ul></div>'
+                f'<div class="change-col"><div class="change-col-title">响应 <span>{len(response_items)}</span></div>'
+                f'<ul class="diff-list">{"".join(render_change_item(c, True) for c in response_items) or "<li class=muted>无响应变化</li>"}</ul></div>'
+                '</div>')
+    foot = ''
+    if status == 'modified':
+        foot = (f'<div class="change-foot"><span class="{"breaking-note" if rec.get("breaking") else ""}">'
+                f'{"破坏性变更：需要前端调整。" if rec.get("breaking") else "兼容变更。"}</span>'
+                f'<span>operationId：{esc(rec["op"].get("operationId", "未声明"))}</span></div>')
+    return (f'<article class="change-card {status}"><div class="change-head"><div class="change-title">'
+            f'<span class="method {method.lower()}">{method}</span><code>{esc(path)}</code>'
+            f'<strong>{esc(summary)}</strong>{badge_for(rec)}</div>{title_link}</div>{body}{foot}</article>')
+
+
+def render_change_detail(rec):
+    status = rec.get('change_status')
+    summary = rec['op'].get('summary') or rec['op'].get('operationId') or rec['path']
+    if status == 'removed':
+        return (f'<article class="change-detail" data-status="removed" data-breaking="true">'
+                f'<div class="change-detail-head"><div class="change-detail-title">'
+                f'<span class="method {rec["method"].lower()}">{rec["method"]}</span>'
+                f'<code>{esc(rec["path"])}</code><strong>{esc(summary)}</strong>{badge_for(rec)}</div>'
+                f'<span class="change-detail-meta">基线中存在</span></div>'
+                f'<div class="removed-summary"><div><b>生产环境行为</b>{esc(summary)}</div>'
+                f'<div><b>当前版本</b>接口已移除，不再保证可用</div>'
+                f'<div><b>前端动作</b>删除入口、调用与错误处理</div></div>'
+                f'<p class="detail-note breaking">破坏性变更：依赖此接口的页面需要移除或改用其他方式。</p></article>')
+    if status == 'added':
+        return (f'<article class="change-detail" data-status="added" data-breaking="false">'
+                f'<div class="change-detail-head"><div class="change-detail-title">'
+                f'<span class="method {rec["method"].lower()}">{rec["method"]}</span>'
+                f'<code>{esc(rec["path"])}</code><strong>{esc(summary)}</strong>{badge_for(rec)}</div>'
+                f'<span class="change-detail-meta">operationId：{esc(rec["op"].get("operationId", "未声明"))}</span></div>'
+                f'<p class="detail-note">生产环境不存在此接口；当前版本新增。按最新契约接入即可。</p>'
+                f'<p class="detail-note"><a class="link" href="#{rec["id"]}">查看完整契约 ↗</a></p></article>')
+    rows = ''.join(
+        f'<tr><td class="area">{esc(c["area"])}</td><td><code>{esc(change_field(c))}</code></td>'
+        f'<td class="old">{esc(c["before"])}</td><td class="new">{esc(c["after"])}</td>'
+        f'<td class="impact {"breaking" if c["breaking"] else ""}">{esc(c["text"])}</td></tr>'
+        for c in rec.get('changes', []))
+    return (f'<article class="change-detail" data-status="modified" data-breaking="{str(bool(rec.get("breaking"))).lower()}">'
+            f'<div class="change-detail-head"><div class="change-detail-title">'
+            f'<span class="method {rec["method"].lower()}">{rec["method"]}</span>'
+            f'<code>{esc(rec["path"])}</code><strong>{esc(summary)}</strong>{badge_for(rec)}</div>'
+            f'<span class="change-detail-meta">operationId：{esc(rec["op"].get("operationId", "未声明"))}</span></div>'
+            f'<div class="diff-table-wrap"><table class="diff-table"><thead><tr><th>区域</th>'
+            f'<th>字段 / 位置</th><th>{esc(BASELINE_LABEL)}</th><th>当前版本</th><th>影响</th></tr></thead>'
+            f'<tbody>{rows}</tbody></table></div>'
+            f'<p class="detail-note {"breaking" if rec.get("breaking") else ""}">'
+            f'{"破坏性变更：需要前端调整。" if rec.get("breaking") else "兼容变更：新增或放宽，不要求现有调用立即修改。"}</p></article>')
+
+
+def change_text(rec):
+    lines = [f'{rec["method"]} {rec["path"]} {rec["op"].get("summary") or ""}'.strip()]
+    for c in rec.get('changes', []):
+        lines.append(f'  {c["area"]} {change_field(c)}：{c["before"]} → {c["after"]}（{c["text"]}）')
+    return '\n'.join(lines)
+
+
+def change_strip(rec):
+    if not rec['module'].get('baseline'):
+        return ''
+    status = rec.get('change_status')
+    if status == 'added':
+        return ('<div class="change-strip added"><div class="strip-main"><span class="eyebrow">CHANGES VS PRO</span>'
+                '<strong>本次新增接口</strong></div><div class="strip-tags"><span class="badge added">新增</span></div>'
+                '<a href="#changes">查看变更明细 ↗</a></div>')
+    if status == 'modified':
+        counts = change_counts(rec.get('changes', []))
+        parts = []
+        if counts.get('请求'):
+            parts.append(f'请求 {counts["请求"]} 项')
+        if counts.get('响应'):
+            parts.append(f'响应 {counts["响应"]} 项')
+        if counts.get('接口'):
+            parts.append(f'接口 {counts["接口"]} 项')
+        if counts.get('鉴权'):
+            parts.append(f'鉴权 {counts["鉴权"]} 项')
+        tags = '<span class="badge breaking">破坏性</span>' if rec.get('breaking') else '<span class="tag">兼容变更</span>'
+        return (f'<div class="change-strip {"breaking" if rec.get("breaking") else "modified"}">'
+                f'<div class="strip-main"><span class="eyebrow">CHANGES VS PRO</span>'
+                f'<strong>本次变更：{" · ".join(parts) or "契约调整"}</strong></div>'
+                f'<div class="strip-tags">{tags}</div><a href="#changes">查看变更明细 ↗</a></div>')
+    return ('<div class="change-strip unchanged"><div class="strip-main"><span class="eyebrow">CHANGES VS PRO</span>'
+            '<strong>本次无契约变化</strong></div><div class="strip-tags"><span class="badge neutral">无变更</span></div>'
+            '<a href="#changes">查看变更明细 ↗</a></div>')
+
+
+def render_change_rail(rec):
+    if not rec['module'].get('baseline'):
+        return ''
+    status = rec.get('change_status')
+    if status == 'added':
+        return ('<aside class="change-rail added"><div class="rail-head"><div><div class="eyebrow">CHANGES VS PRO</div>'
+                '<h2>本次变更</h2></div><span class="badge added">新增</span></div>'
+                f'<div class="rail-meta">{esc(BASELINE_LABEL)}不存在此接口</div>'
+                '<p class="rail-note">新增接口，不影响已有调用；按最新契约接入即可。</p>'
+                '<a class="rail-link" href="#changes">查看完整变更 ↗</a></aside>')
+    if status == 'modified':
+        request_items = [c for c in rec.get('changes', []) if c['area'] == '请求']
+        response_items = [c for c in rec.get('changes', []) if c['area'] == '响应']
+        other_items = [c for c in rec.get('changes', []) if c['area'] in ('接口', '鉴权')]
+        sections = []
+        for title, items in [('请求', request_items), ('响应', response_items), ('其他', other_items)]:
+            if items:
+                sections.append(f'<section class="rail-section"><div class="rail-section-head">{title} '
+                                f'<span>{len(items)}</span></div>'
+                                f'{"".join(render_change_item(c, True) for c in items)}</section>')
+        note = ('<div class="rail-note">破坏性变更：需要前端调整成功或失败分支。</div>'
+                if rec.get('breaking') else '<div class="rail-note">兼容变更：新增或放宽，不要求现有调用立即修改。</div>')
+        return (f'<aside class="change-rail"><div class="rail-head"><div><div class="eyebrow">CHANGES VS PRO</div>'
+                f'<h2>本次变更</h2></div>{badge_for(rec)}</div>'
+                f'<div class="rail-meta">{esc(BASELINE_LABEL)}{(" · " + esc(BASELINE_DATE)) if BASELINE_DATE else ""}</div>'
+                f'{"".join(sections)}{note}'
+                f'<button type="button" class="copy-btn" data-copy="{rec["id"]}-change">复制变更</button>'
+                '<a class="rail-link" href="#changes">查看完整变更 ↗</a></aside>'
+                f'<div id="{rec["id"]}-change" hidden>{esc(change_text(rec))}</div>')
+    return ('<aside class="change-rail unchanged"><div class="rail-head"><div><div class="eyebrow">CHANGES VS PRO</div>'
+            '<h2>本次变更</h2></div><span class="badge neutral">无变更</span></div>'
+            f'<div class="rail-meta">{esc(BASELINE_LABEL)}{(" · " + esc(BASELINE_DATE)) if BASELINE_DATE else ""}</div>'
+            '<div class="empty-change"><div class="empty-icon">✓</div><p>请求与响应均未变化。</p>'
+            '<small>现有调用无需调整。</small></div></aside>')
+
+
+def response_html(code, response, doc, change_fields=None):
+    response = resolve(response, doc)
+    ok = str(code).startswith('2')
+    parts = [f'<div class="response-head"><span class="status {"ok" if ok else "err"}">{esc(code)}</span>'
+             f'<span>{esc(response.get("description", ""))}</span></div>']
+    for ctype, media in response.get('content', {}).items():
+        parts.append(f'<h3>{esc(ctype)}</h3>')
+        if media.get('schema'):
+            parts.append(field_table(media['schema'], doc, 'response', change_fields, str(code)))
+    if not response.get('content'):
+        message = ('该状态码不包含响应体，前端无需调用 response.json()。' if str(code) in ('204', '205') else
+                   '未声明响应内容；是否无响应体需结合状态码与实际实现确认。')
+        parts.append(f'<p class="empty-inline">{message}</p>')
+    if response.get('headers'):
+        parts.append('<div class="eyebrow" style="margin-top:14px">响应头</div>')
+        parts.append(parameter_table([dict(resolve(h, doc), name=n, **{'in': 'header'})
+                                      for n, h in response['headers'].items()], doc))
+    return '<div class="response-block">' + ''.join(parts) + '</div>'
+
+
+def render_endpoint(rec):
+    op, doc, anchor = rec['op'], rec['doc'], rec['id']
+    hints = rec['hints']
+    label, auth = auth_text(op, doc)
+    summary = op.get('summary') or op.get('operationId') or rec['path']
+    chips = ''.join(f'<span class="tag">{esc(tag)}</span>' for tag in op.get('tags', []))
+    usage = hints.get('usage') or op.get('description', '')
+    notes = hints.get('notes', [])
+    notes_html = '<ul class="notes">' + ''.join(f'<li>{esc(n)}</li>' for n in notes) + '</ul>' if notes else ''
+    change_fields = {(c['area'], c.get('scope', ''), c['field']): c for c in rec.get('changes', [])}
+    request = '<h3>路径、查询与请求头</h3>' + parameter_table(rec['params'], doc, change_fields)
+    body = resolve(op.get('requestBody', {}), doc)
+    for ctype, media in body.get('content', {}).items():
+        request += (f'<h3>请求体 <span class="tag">{esc(ctype)}</span> '
+                    f'<span class="{"req" if body.get("required") else "opt"}">'
+                    f'{"必填" if body.get("required") else "可选"}</span></h3>')
+        request += field_table(media.get('schema', {}), doc, 'request', change_fields)
+    if not body.get('content'):
+        request += '<div class="quiet-note">该接口未声明请求体。</div>'
+    successes, failures = [], []
+    for code, raw in (op.get('responses') or {}).items():
+        response = resolve(raw, doc)
+        (successes if str(code).startswith('2') else failures).append(response_html(code, response, doc, change_fields))
+    if not successes:
+        successes.append('<div class="quiet-note">未声明成功响应，请向后端确认。</div>')
+    if not failures:
+        failures.append('<div class="quiet-note">未声明异常响应。请确认鉴权失败、校验失败与业务异常的状态码及返回结构。</div>')
+    overview = (f'<h3>什么时候调用</h3><p class="prose">{esc(usage) if usage else "尚未补充使用场景，可在 operationDocs 中添加。"}</p>'
+                f'<div class="auth-card"><span class="eyebrow">{esc(label)}</span><p>{esc(auth)}</p></div>'
+                f'<h3>联调提示</h3>{notes_html or "<p class=empty-inline>暂无额外约定；字段约束与异常响应见对应标签。</p>"}')
+    panels = [('overview', '使用说明', overview), ('request', '请求', request),
+              ('response', '成功响应', ''.join(successes)), ('errors', '异常响应', ''.join(failures))]
+    tab_html = ''.join(f'<button type="button" role="tab" id="{anchor}-tab-{key}" aria-controls="{anchor}-{key}" '
+                       f'aria-selected="{str(i == 0).lower()}" tabindex="{0 if i == 0 else -1}">{title}</button>'
+                       for i, (key, title, _) in enumerate(panels))
+    content_html = ''.join(f'<div class="tab-panel{" active" if i == 0 else ""}" id="{anchor}-{key}" '
+                           f'role="tabpanel" aria-labelledby="{anchor}-tab-{key}">{content}</div>'
+                           for i, (key, _, content) in enumerate(panels))
+    rail = render_change_rail(rec)
+    workspace_class = 'workspace' if rail else 'workspace single'
+    departure = op.get('deprecated')
+    deprecated_tag = '<span class="badge breaking">已弃用</span>' if departure else ''
+    return f'''<section class="view endpoint" id="{anchor}" data-title="{esc(summary)}">
+<div class="breadcrumb">接口参考 <span>/</span> {esc(rec['module']['title'])} <span>/</span> {esc(op.get('operationId', summary))}</div>
+<div class="endpoint-title"><div><div class="eyebrow">{esc(rec['module']['title'])}</div><h1>{esc(summary)}</h1></div>{deprecated_tag}</div>
+<div class="endpoint-bar"><span class="method {rec['method'].lower()}">{rec['method']}</span><code>{esc(rec['path'])}</code><button type="button" class="copy-btn" data-copy="{anchor}-url">复制 URL</button></div>
+<div class="endpoint-meta">{chips}<span class="auth-badge">{esc(label)}</span><span>Base URL <code>{esc(rec['base']) or '待确认'}</code></span><a class="agent-entry" href="#agent" data-agent-scope="{anchor}">交给 Agent ↗</a></div>
+<span id="{anchor}-url" hidden>{esc(rec['base'].rstrip('/') + rec['path'])}</span>
+{change_strip(rec)}
+<div class="{workspace_class}"><div class="contract"><div class="tabs" role="tablist" aria-label="{esc(summary)}详情">{tab_html}</div>{content_html}</div>{rail}</div></section>'''
+
+
+def render_workflows(records):
+    cards = []
+    for flow in CONFIG.get('workflows', []):
+        steps = []
+        for step in flow.get('steps', []):
+            matches = [r for r in records if (not step.get('module') or step['module'] == r['module']['title']) and
+                       ((step.get('operationId') and r['op'].get('operationId') == step['operationId']) or
+                        (step.get('endpoint') and step['endpoint'] == r['method'] + ' ' + r['path']))]
+            if len(matches) != 1:
+                raise ValueError(f'流程 {flow.get("title")}: 接口引用需唯一匹配，实际 {len(matches)} 条: {step}')
+            r = matches[0]
+            steps.append(f'<li><a href="#{r["id"]}">{esc(r["op"].get("summary") or r["path"])} <span>↗</span></a>'
+                         f'<p>{esc(step.get("note", ""))}</p></li>')
+        cards.append(f'<article class="flow-card"><h3>{esc(flow.get("title", ""))}</h3>'
+                     f'<p>{esc(flow.get("description", ""))}</p><ol>{"".join(steps)}</ol></article>')
+    return '<div class="flow-grid">' + ''.join(cards) + '</div>' if cards else '<div class="quiet">尚未补充页面调用流程。可根据真实业务配置 workflows，将页面动作关联到接口。</div>'
+
+
+def render_overview(records, diffs):
+    groups = []
+    for module in MODULES:
+        operations = [r for r in records if r['module'] is module]
+        base = operations[0]['base'] if operations else module.get('baseUrl', '')
+        links = ''.join(
+            f'<a class="endpoint-link" href="#{r["id"]}"><span class="method {r["method"].lower()}">{r["method"]}</span>'
+            f'<span class="grow"><strong>{esc(r["op"].get("summary") or r["path"])}</strong><code>{esc(r["path"])}</code></span>'
+            f'{badge_for(r)}<span class="arrow">↗</span></a>' for r in operations)
+        groups.append(f'<article class="module-card"><div class="module-card-head"><h3>{esc(module["title"])}</h3>'
+                      f'<span>{len(operations)} 个接口</span></div><code class="base-url">{esc(base) or "Base URL 待确认"}</code>'
+                      f'<p class="muted">{esc(module.get("note", ""))}</p>{links or "<p class=muted>无接口</p>"}</article>')
+    missing_auth = sum(auth_text(r['op'], r['doc'])[0] == '待确认' for r in records)
+    missing_errors = sum(not any(not str(c).startswith('2') for c in r['op'].get('responses', {})) for r in records)
+    pending = missing_auth + missing_errors
+    guides = ''.join(f'<article class="guide-card"><span class="guide-index">{i + 1:02}</span>'
+                     f'<h3>{esc(g["title"])}</h3><p>{esc(g["text"])}</p></article>'
+                     for i, g in enumerate(CONFIG.get('integration', [])))
+    if not guides:
+        guides = '<div class="quiet">尚未补充接入约定。建议确认登录态来源、分页、空值、时间与业务错误的处理方式。</div>'
+    baseline_pill = ''
+    if diffs['has_baseline']:
+        baseline_pill = (f'<span class="pill pro"><span class="dot"></span>变更基线：{esc(BASELINE_LABEL)}'
+                         f'{" · " + esc(BASELINE_DATE) if BASELINE_DATE else ""}</span>')
+    else:
+        baseline_pill = '<span class="pill"><span class="dot"></span>未提供变更基线</span>'
+    change_summary = ''
+    change_cards = ''
+    if diffs['has_baseline']:
+        cards = []
+        for entry in diffs['modules']:
+            for rec in entry['added'] + entry['modified'] + entry['removed']:
+                cards.append(render_change_card(rec))
+        change_cards = ''.join(cards[:8])
+        more = ''
+        if len(cards) > 8:
+            more = f'<p class="detail-note"><a class="link" href="#changes">查看全部 {len(cards)} 项变更 ↗</a></p>'
+        change_summary = f'''<div class="section-head"><div><div class="eyebrow">01 / CHANGES</div><h2>本次变更</h2></div><span class="side">对比 {esc(BASELINE_LABEL)}{(" · " + esc(BASELINE_DATE)) if BASELINE_DATE else ""}</span></div>
+<div class="change-overview"><div class="change-summary"><span class="label">共 {diffs["total"]} 项</span>
+<span class="chip add">新增 <b>{diffs["added"]}</b></span><span class="chip mod">修改 <b>{diffs["modified"]}</b></span>
+<span class="chip del">移除 <b>{diffs["removed"]}</b></span><span class="chip brk">破坏性 <b>{diffs["breaking"]}</b></span>
+<span class="grow"></span><a class="link" href="#changes" style="font-size:10px">查看完整变更明细 ↗</a></div>
+<div class="change-cards">{change_cards}</div>{more}</div>'''
+    change_count = diffs['total'] if diffs['has_baseline'] else 0
+    stats = (f'<div class="stats"><div class="stat"><strong>{len(records):02}</strong><span>当前接口</span>'
+             f'<small>{len(MODULES)} 个模块</small></div>'
+             f'<div class="stat"><strong>{change_count:02}</strong><span>本次变更</span><small>对比 {esc(BASELINE_LABEL) if diffs["has_baseline"] else "未提供基线"}</small></div>'
+             f'<div class="stat alert"><strong>{diffs["breaking"]:02}</strong><span>破坏性变更</span><small>需要前端调整</small></div>'
+             f'<div class="stat"><strong>{pending:02}</strong><span>待确认</span><small>契约缺口</small></div></div>')
+    change_link = '<a href="#changes">查看本次变更 ↗</a>' if diffs['has_baseline'] else ''
+    hero_bottom = (f'{baseline_pill}'
+                   f'<span class="pill">{esc(CONFIG.get("audience", "面向前端开发"))}</span>'
+                   f'<span>生成于 {datetime.now().strftime("%Y-%m-%d")}</span><span class="grow"></span>'
+                   f'{change_link}')
+    hero_notes = ''.join(f'<div class="quiet" style="margin-top:10px">{note}</div>' for note in HERO_NOTES)
+    agent_link = '<a href="#agent">带入 Agent 任务包 ↗</a>' if diffs['has_baseline'] else ''
+    coverage = (f'<div class="coverage"><div><h3>联调前待确认</h3><p>{missing_auth} 个接口未声明鉴权，'
+                f'{missing_errors} 个接口未声明异常响应。缺失声明不代表无需鉴权或不会失败，请结合后端实现确认。</p></div>'
+                f'{agent_link}</div>')
+    return f'''<section class="view active overview" id="overview" data-title="开始对接">
+<div class="breadcrumb">项目文档 <span>/</span> 开始对接</div>
+<header class="hero"><div class="eyebrow">FRONTEND INTEGRATION GUIDE</div><h1>{esc(TITLE)}</h1>
+<p>{esc(CONFIG.get('description', '先看本次变更，再查完整契约。页面只保留前端真正需要的字段、约束和错误分支。'))}</p>
+<div class="hero-meta">{hero_bottom}</div></header>
+{stats}
+{change_summary}
+<div class="section-head"><div><div class="eyebrow">02 / GET STARTED</div><h2>接入前，先对齐这些</h2></div><span class="side">项目级约定</span></div>
+<div class="guide-grid">{guides}</div>{hero_notes}
+<div class="section-head"><div><div class="eyebrow">03 / USER FLOWS</div><h2>按页面动作串起接口</h2></div><span class="side">点击步骤查看契约</span></div>
+{render_workflows(records)}
+<div class="section-head" id="catalog"><div><div class="eyebrow">04 / API REFERENCE</div><h2>接口目录</h2></div><span class="side">功能名称 · 方法 · 路径</span></div>
+<div class="module-grid">{''.join(groups)}</div>
+{coverage}
+<footer><span>由接口契约生成 · {datetime.now().strftime('%Y-%m-%d')} · 业务约定以已确认说明为准</span>
+<span>变更基线：{esc(BASELINE_LABEL) if diffs["has_baseline"] else "未提供"}</span></footer></section>'''
+
+
+def render_changes(records, diffs):
+    if not diffs['has_baseline']:
+        return ''
+    modified = [r for e in diffs['modules'] for r in e['modified']]
+    added = [r for e in diffs['modules'] for r in e['added']]
+    removed = [r for e in diffs['modules'] for r in e['removed']]
+    unchanged = [r for r in records if r['module'].get('baseline') and not r.get('change_status')]
+    copy_lines = [f'本次变更（对比 {BASELINE_LABEL}{("，" + BASELINE_DATE) if BASELINE_DATE else ""}）',
+                  f'新增 {len(added)} 项 · 修改 {len(modified)} 项 · 移除 {len(removed)} 项 · 破坏性 {diffs["breaking"]} 项']
+    for rec in added:
+        copy_lines.append(f'+ {rec["method"]} {rec["path"]} {rec["op"].get("summary") or ""}（新增）'.strip())
+    for rec in modified:
+        copy_lines.append(f'~ {rec["method"]} {rec["path"]} {rec["op"].get("summary") or ""}'.strip())
+        for c in rec.get('changes', []):
+            copy_lines.append(f'  {c["area"]} {change_field(c)}：{c["before"]} → {c["after"]}（{c["text"]}）')
+    for rec in removed:
+        copy_lines.append(f'- {rec["method"]} {rec["path"]} {rec["op"].get("summary") or ""}（移除，破坏性）'.strip())
+    def group(status, title, items):
+        if not items:
+            return ''
+        cards = ''.join(render_change_detail(r) for r in items)
+        return (f'<div class="change-group" data-group="{status}"><div class="change-group-head">'
+                f'<h2>{title}</h2><span class="count">{len(items)}</span></div>{cards}</div>')
+    unchanged_html = ''
+    if unchanged:
+        cards = ''.join(
+            f'<article class="change-detail" data-status="unchanged" data-breaking="false" style="border-left:3px solid #cfded7">'
+            f'<div class="change-detail-head"><div class="change-detail-title">'
+            f'<span class="method {r["method"].lower()}">{r["method"]}</span><code>{esc(r["path"])}</code>'
+            f'<strong>{esc(r["op"].get("summary") or r["path"])}</strong><span class="badge neutral">无变更</span></div>'
+            f'<span class="change-detail-meta">operationId：{esc(r["op"].get("operationId", "未声明"))}</span></div>'
+            f'<p class="detail-note">请求与响应均未变化。可作为本次接入的稳定参照。</p></article>'
+            for r in unchanged)
+        unchanged_html = (f'<div class="change-group" data-group="unchanged"><div class="change-group-head">'
+                          f'<h2>未变更</h2><span class="count">{len(unchanged)}</span></div>{cards}</div>')
+    return f'''<section class="view" id="changes" data-title="本次变更">
+<div class="breadcrumb">项目文档 <span>/</span> 本次变更</div>
+<div class="changes-hero"><div><div class="eyebrow">CHANGES VS PRODUCTION</div><h1>本次变更</h1>
+<p>对比 {esc(BASELINE_LABEL)}{("（" + esc(BASELINE_DATE) + "）") if BASELINE_DATE else ""}。新增 {len(added)} 个接口、修改 {len(modified)} 个接口、移除 {len(removed)} 个接口；其中 {diffs["breaking"]} 项为破坏性变更。</p></div>
+<span class="pill pro"><span class="dot"></span>{esc(BASELINE_LABEL)}{(" · " + esc(BASELINE_DATE)) if BASELINE_DATE else ""}</span></div>
+<div class="changes-toolbar"><div class="segmented" role="group" aria-label="按变更类型筛选">
+<button type="button" class="active" data-change-filter="all">全部</button>
+<button type="button" data-change-filter="added">新增 <span>{len(added)}</span></button>
+<button type="button" data-change-filter="modified">修改 <span>{len(modified)}</span></button>
+<button type="button" data-change-filter="removed">移除 <span>{len(removed)}</span></button></div>
+<label class="switch"><input type="checkbox" id="breaking-only"> 只看破坏性</label><span class="grow"></span>
+<button type="button" class="copy-btn" data-copy="changes-copy">复制变更清单</button></div>
+<div id="changes-copy" hidden>{esc(chr(10).join(copy_lines))}</div>
+{group('modified', '修改接口', modified)}
+{group('added', '新增接口', added)}
+{group('removed', '移除接口', removed)}
+{unchanged_html}
+</section>'''
+
+
+def render_enums():
+    if not ENUMS:
+        return ''
+    cards = []
+    for block in ENUMS:
+        rows = ''.join(f'<tr><td><code>{esc(row[0])}</code></td><td>{esc(row[1]) if len(row) > 1 else ""}</td></tr>'
+                       for row in block.get('rows', []) if row)
+        cards.append(f'<article class="module-card"><h3>{esc(block.get("title", ""))}</h3>'
+                     f'<table><thead><tr><th>字段</th><th>取值说明</th></tr></thead><tbody>{rows}</tbody></table></article>')
+    return ('<section class="view" id="enums" data-title="枚举速查"><div class="breadcrumb">项目文档 / 枚举速查</div>'
+            '<h1>枚举与取值速查</h1><div class="module-grid">' + ''.join(cards) + '</div></section>')
+
+
+def handoff_data(records, diffs):
     copy = lambda value: json.loads(json.dumps(value))
-    modules, operations, scopes, workflows = [], [], [], []
+    modules, operations, scopes, removed = [], [], [], []
     for index, module in enumerate(MODULES):
         group = [r for r in records if r['module'] is module]
         module_id = f'module-{index}'
@@ -472,6 +1123,8 @@ def handoff_data(records):
         if 'baseUrl' in module:
             source['servers'] = [{'url': module['baseUrl']}]
         for name, schema in source.get('components', {}).get('schemas', {}).items():
+            if not isinstance(schema, dict):
+                continue
             for prop, field in schema.get('properties', {}).items():
                 desc = field_desc(name, prop)
                 if desc and isinstance(field, dict):
@@ -496,13 +1149,17 @@ def handoff_data(records):
                 pending.append('未声明成功响应。')
             if not any(not str(code).startswith('2') for code in op.get('responses', {})):
                 pending.append('未声明异常响应，需确认错误状态码与结构。')
-            if not usage:
-                pending.append('使用场景尚未补充，需结合用户任务及已有页面确认。')
             summary = op.get('summary') or op.get('operationId') or rec['path']
             operations.append(dict(id=rec['id'], moduleId=module_id, path=rec['path'], method=rec['method'],
                                    operationId=op.get('operationId', ''), summary=summary, usage=usage,
                                    notes=copy(rec['hints'].get('notes', [])), authentication=label + '：' + auth,
-                                   pending=pending, contract=op))
+                                   pending=pending, contract=op, changeStatus=rec.get('change_status'),
+                                   changes=copy(rec.get('changes', [])), breaking=rec.get('breaking', False)))
+        for br in next((e for e in diffs['modules'] if e['module'] is module), {'removed': []})['removed']:
+            removed.append(dict(id=br.get('id', ''), moduleId=module_id, endpoint=f'{br["method"]} {br["path"]}',
+                                method=br['method'], path=br['path'],
+                                summary=br['op'].get('summary') or br['op'].get('operationId') or br['path'],
+                                moduleTitle=module['title']))
     for index, flow in enumerate(CONFIG.get('workflows', [])):
         steps, ids = [], []
         for step in flow.get('steps', []):
@@ -511,255 +1168,43 @@ def handoff_data(records):
                         (step.get('endpoint') and step['endpoint'] == r['method'] + ' ' + r['path']))]
             if len(matches) != 1:
                 raise ValueError(f'流程 {flow.get("title")}: 接口引用需唯一匹配，实际 {len(matches)} 条: {step}')
-            rec = matches[0]
-            ids.append(rec['id'])
-            steps.append(dict(module=rec['module']['title'], endpoint=rec['method'] + ' ' + rec['path'], note=step.get('note', '')))
-        workflows.append(dict(title=flow.get('title', ''), description=flow.get('description', ''), steps=steps, operations=ids))
+            ids.append(matches[0]['id'])
         scopes.append(dict(id=f'flow-{index}', label='流程 · ' + flow.get('title', ''), operations=ids))
-    scopes = [dict(id='all', label='全部接口', operations=[r['id'] for r in records])] + scopes
-    scopes.extend(dict(id=r['id'], label=r['module']['title'] + ' · ' + r['method'] + ' ' + r['path'], operations=[r['id']]) for r in records)
+    changed_ids = [r['id'] for r in records if r.get('change_status') in ('added', 'modified')]
+    prefix = []
+    if changed_ids or removed:
+        prefix.append(dict(id='changed', label=f'本次变更的接口（{len(changed_ids) + len(removed)}）',
+                           operations=changed_ids))
+    prefix.append(dict(id='all', label=f'全部接口（{len(records)}）', operations=[r['id'] for r in records]))
+    scopes = prefix + scopes
+    scopes.extend(dict(id=r['id'], label=r['module']['title'] + ' · ' + r['method'] + ' ' + r['path'],
+                       operations=[r['id']]) for r in records)
     agent = CONFIG.get('agent', {})
     return dict(title=TITLE, audience=CONFIG.get('audience', '前端开发'), modules=modules, operations=operations,
-                scopes=scopes, workflows=workflows, integration=CONFIG.get('integration', []), enums=ENUMS,
-                task=agent.get('task', ''), constraints=agent.get('constraints', []), acceptanceCriteria=agent.get('acceptanceCriteria', []))
+                scopes=scopes, removed=removed, hasBaseline=diffs['has_baseline'],
+                baselineLabel=BASELINE_LABEL, baselineDate=BASELINE_DATE,
+                task=agent.get('task', ''))
 
 
 def render_agent_handoff(data):
     options = ''.join(f'<option value="{s["id"]}">{esc(s["label"])}</option>' for s in data['scopes'])
+    default_scope = data['scopes'][0]
+    default_count = len(default_scope['operations'])
+    changes = sum(1 for op in data['operations']
+                  if op['id'] in default_scope['operations'] and (op.get('changeStatus') or op.get('changes')))
     return f'''<section class="view" id="agent" data-title="交给 Agent">
 <div class="breadcrumb">项目文档 <span>/</span> 交给 Agent</div>
-<div class="eyebrow">AGENT HANDOFF</div><h1>把对接资料交给前端 Agent</h1>
-<p class="handoff-intro">选择范围、补充目标页面，再复制任务包。Agent 会先读取你的前端仓库约定，复用现有请求与类型封装。</p>
+<div class="eyebrow">AGENT HANDOFF</div><h1>把这次要调整的接口交给前端 Agent</h1>
+<p class="handoff-intro">选择一个范围、补充任务，复制任务包。包内只有本次任务、变更清单和所选接口的最新 OpenAPI 契约；通用编码约束由前端 Agent 按其仓库规范处理。</p>
 <div class="handoff-controls"><div><label for="agent-scope">01 · 选择接口范围</label><select id="agent-scope">{options}</select></div>
-<div><label for="agent-task">02 · 补充本次任务（可选）</label><textarea id="agent-task" rows="3" placeholder="例如：将订单列表与详情接入已有页面，保留现有筛选和分页交互。">{esc(data['task'])}</textarea></div></div>
-<div class="handoff-toolbar"><div><strong>03 · 交给 Agent</strong><p id="agent-summary" aria-live="polite"></p></div><div class="handoff-actions">
-<button type="button" class="primary-button" data-copy="agent-prompt">复制 Agent 任务</button><button type="button" id="agent-download-md">下载任务 .md</button><button type="button" id="agent-download-json">下载契约包 .json</button></div></div>
-<div class="quiet-note">复制后粘贴到前端 Agent，或把下载的文件交给它。任务包保留字段、约束、鉴权与引用模型；不会读取本机登录令牌，也不会自动调用接口。请核对源码示例中是否含有不应分享的数据。</div>
-<label class="handoff-preview-label" for="agent-prompt">任务包预览 · Markdown</label><textarea id="agent-prompt" class="handoff-preview" readonly spellcheck="false" aria-label="Agent 任务包预览"></textarea>
-<noscript><p>此模块的范围选择与导出需要启用 JavaScript。接口参考仍可直接阅读。</p></noscript></section>'''
-
-
-def code_block(text, label, ident, lang='json'):
-    return (f'<div class="code-heading"><span>{esc(label)}</span><button class="copy-code" data-copy="{ident}" type="button">复制</button></div>'
-            f'<pre id="{ident}" data-lang="{lang}"><code>{esc(text)}</code></pre>')
-
-
-def fetch_code(rec):
-    op, doc = rec['op'], rec['doc']
-    # Keep a visible base placeholder instead of accidentally treating a relative server as the docs origin.
-    base = rec['base'] or 'https://YOUR_API_HOST'
-    lines = ['// 调用示例：替换占位值，并按项目约定接入鉴权与错误处理。',
-             'const baseUrl = ' + json.dumps(base, ensure_ascii=False) + ';']
-    path = rec['path']
-    path_expr = json.dumps(path, ensure_ascii=False)
-    for p in rec['params']:
-        if p.get('in') == 'path':
-            value = p.get('example', sample(p.get('schema', {}), doc, 'request'))
-            path_expr += '.replace(' + json.dumps('{' + p['name'] + '}') + ', encodeURIComponent(String(' + json.dumps(value, ensure_ascii=False) + ')))'
-    lines.append('const path = ' + path_expr + ';')
-    lines.append(r'const url = new URL(baseUrl.replace(/\/$/, "") + path, "https://YOUR_API_HOST");')
-    for p in rec['params']:
-        if p.get('in') == 'query':
-            lines.append('// ' + p['name'] + ('：必填' if p.get('required') else '：可选，按需添加'))
-            val = p.get('example', sample(p.get('schema', {}), doc, 'request'))
-            if isinstance(val, (dict, list)):
-                lines.append('// 复杂参数 ' + p['name'] + '：请按 style/explode 约定序列化。')
-            else:
-                lines.append('url.searchParams.set(' + json.dumps(p['name']) + ', String(' + json.dumps(val, ensure_ascii=False) + '));')
-    headers = {p['name']: '<' + p['name'] + '>' for p in rec['params'] if p.get('in') == 'header'}
-    security = op.get('security', doc.get('security', []))
-    schemes = doc.get('components', {}).get('securitySchemes', {})
-    credentials = False
-    if security and all(security):
-        lines.append('// 以下采用第一组鉴权方案，凭据由项目登录态提供。')
-        for name in security[0]:
-            scheme = resolve(schemes.get(name, {}), doc)
-            if scheme.get('type') == 'http':
-                headers['Authorization'] = scheme.get('scheme', '').title() + ' <credentials>'
-            elif scheme.get('type') == 'apiKey' and scheme.get('in') == 'header':
-                headers[scheme.get('name', name)] = '<api-key>'
-            elif scheme.get('type') == 'apiKey' and scheme.get('in') == 'query':
-                lines.append('url.searchParams.set(' + json.dumps(scheme.get('name', name)) + ', "<api-key>");')
-            elif scheme.get('type') == 'apiKey' and scheme.get('in') == 'cookie':
-                credentials = True
-            else:
-                lines.append('// ' + name + '：按项目约定获取凭据并设置请求。')
-    body = resolve(op.get('requestBody', {}), doc)
-    contents = body.get('content', {})
-    chosen = next(((t, m) for t, m in contents.items() if 'json' in t), next(iter(contents.items()), None))
-    body_line = ''
-    if chosen:
-        ctype, media = chosen
-        value, _ = media_example(media, doc, 'request')
-        if 'json' in ctype:
-            headers['Content-Type'] = ctype
-            lines.append('const body = ' + pretty(value) + ';')
-            body_line = '  body: JSON.stringify(body),'
-        elif ctype == 'multipart/form-data':
-            lines += ['const body = new FormData();', '// 按请求字段追加数据；文件字段使用 File / Blob。']
-            for name, sch in shape(media.get('schema', {}), doc).get('properties', {}).items():
-                v = shape(sch, doc)
-                if v.get('format') == 'binary':
-                    lines.append('body.append(' + json.dumps(name) + ', new File([], "REPLACE_WITH_REAL_FILE"));')
-                else:
-                    lines.append('body.append(' + json.dumps(name) + ', String(' + json.dumps(sample(sch, doc, 'request'), ensure_ascii=False) + '));')
-            body_line = '  body,'
-        else:
-            lines.append('// ' + ctype + '：请按该媒体类型构造请求体。')
-    lines.append('const response = await fetch(url, {')
-    lines.append('  method: ' + json.dumps(rec['method']) + ',')
-    if headers:
-        lines.append('  headers: ' + pretty(headers).replace('\n', '\n  ') + ',')
-    if credentials:
-        lines.append('  credentials: "include", // 跨域时还需服务端允许凭据')
-    if body_line:
-        lines.append(body_line)
-    lines += ['});', 'if (!response.ok) {', '  // 在这里结合下方异常响应处理业务提示。',
-              '  throw new Error(`HTTP ${response.status}`);', '}']
-    if rec['method'] == 'HEAD':
-        lines.append('const result = response.headers;')
-    else:
-        lines += ['const contentType = response.headers.get("content-type") ?? "";',
-                  'const result = response.status === 204 || response.status === 205', '  ? undefined',
-                  '  : contentType.includes("json")', '    ? await response.json()',
-                  '    : contentType.startsWith("text/")', '      ? await response.text()',
-                  '      : await response.blob();']
-    return '\n'.join(lines)
-
-
-def response_html(code, response, doc):
-    response = resolve(response, doc)
-    parts = [f'<div class="response-heading"><span class="status {"success" if str(code).startswith("2") else "failure"}">{esc(code)}</span>'
-             f'<span>{esc(response.get("description", ""))}</span></div>']
-    for ctype, media in response.get('content', {}).items():
-        parts.append(f'<h4>{esc(ctype)}</h4>')
-        if media.get('schema'):
-            parts.append(field_table(media['schema'], doc, 'response'))
-    if not response.get('content'):
-        message = ('该状态码不包含响应体，前端无需调用 response.json()。' if str(code) in ('204', '205') else
-                   '未声明响应内容；是否无响应体需结合状态码与实际实现确认。')
-        parts.append(f'<p class="empty-inline">{message}</p>')
-    if response.get('headers'):
-        parts.append('<p class="eyebrow">响应头</p>')
-        parts.append(parameter_table([dict(resolve(h, doc), name=n, **{'in': 'header'})
-                                      for n, h in response['headers'].items()], doc))
-    return '<div class="response-block">' + ''.join(parts) + '</div>'
-
-
-def render_endpoint(rec):
-    op, doc, anchor = rec['op'], rec['doc'], rec['id']
-    hints = rec['hints']
-    label, auth = auth_text(op, doc)
-    summary = op.get('summary') or op.get('operationId') or rec['path']
-    chips = ''.join(f'<span class="tag">{esc(tag)}</span>' for tag in op.get('tags', []))
-    usage = hints.get('usage') or op.get('description', '')
-    notes = hints.get('notes', [])
-    notes_html = '<ul class="notes">' + ''.join(f'<li>{esc(n)}</li>' for n in notes) + '</ul>' if notes else ''
-    request = '<h3>路径、查询与请求头</h3>' + parameter_table(rec['params'], doc)
-    body = resolve(op.get('requestBody', {}), doc)
-    snippets = []
-    types = ['// 由接口契约推导；运行时仍需校验返回值，递归结构以 unknown 截断。']
-    if rec['params']:
-        for location, name in [('path', 'PathParams'), ('query', 'QueryParams'), ('header', 'HeaderParams')]:
-            params = [p for p in rec['params'] if p.get('in') == location]
-            if params:
-                schema = {'type': 'object', 'properties': {p['name']: p.get('schema', {}) for p in params},
-                          'required': [p['name'] for p in params if p.get('required') or location == 'path'], 'additionalProperties': False}
-                types.append('export type ' + name + ' = ' + ts_type(schema, doc, 'request') + ';')
-    for i, (ctype, media) in enumerate(body.get('content', {}).items()):
-        request += f'<h3>请求体 <span class="tag">{esc(ctype)}</span> <span class="{"required" if body.get("required") else "optional"}">{"必填" if body.get("required") else "可选"}</span></h3>'
-        request += field_table(media.get('schema', {}), doc, 'request')
-        value, source = media_example(media, doc, 'request')
-        snippets.append(('请求示例' + (f' · {ctype}' if i else ''), pretty(value), source, 'json'))
-        types.append('export type RequestBody' + (str(i + 1) if i else '') + ' = ' + ts_type(media.get('schema', {}), doc, 'request') + ';')
-    if not body.get('content'):
-        request += '<div class="quiet-note">该接口未声明请求体。</div>'
-    successes, failures = [], []
-    for code, raw in (op.get('responses') or {}).items():
-        response = resolve(raw, doc)
-        (successes if str(code).startswith('2') else failures).append(response_html(code, response, doc))
-        for i, (ctype, media) in enumerate(response.get('content', {}).items()):
-            value, source = media_example(media, doc, 'response')
-            snippets.append((f'{code} 响应' + (f' · {ctype}' if i else ''), pretty(value), source, 'json'))
-            type_name = 'Response' + re.sub(r'\W', '', str(code)) + (str(i + 1) if i else '')
-            types.append('export type ' + type_name + ' = ' + ts_type(media.get('schema', {}), doc, 'response') + ';')
-    if not successes:
-        successes.append('<div class="quiet-note">未声明成功响应，请向后端确认。</div>')
-    if not failures:
-        failures.append('<div class="quiet-note">未声明异常响应。请确认鉴权失败、校验失败与业务异常的状态码及返回结构。</div>')
-    snippets = [('Fetch', fetch_code(rec), '调用骨架 · 不会在文档中发送请求', 'js'),
-                ('TypeScript', '\n\n'.join(types), '按契约推导 · 可复制到项目后调整', 'ts')] + snippets
-    tabs, panels = [], []
-    for index, (title, code, source, lang) in enumerate(snippets):
-        ident = f'{anchor}-code-{index}'
-        tabs.append(f'<option value="{ident}">{esc(title)}</option>')
-        panels.append(f'<div class="snippet" id="{ident}">{code_block(code, source, ident + "-text", lang)}</div>')
-    overview = (f'<h3>什么时候调用</h3><p class="prose">{esc(usage) if usage else "尚未补充使用场景，可在 operationDocs 中添加。"}</p>'
-                f'<div class="auth-card"><span class="eyebrow">{esc(label)}</span><p>{esc(auth)}</p></div>'
-                f'<h3>联调提示</h3>{notes_html or "<p class=empty-inline>暂无额外约定；字段约束与异常响应见对应标签。</p>"}')
-    panels_body = [('overview', '使用说明', overview), ('request', '请求', request),
-                   ('response', '成功响应', ''.join(successes)), ('errors', '异常响应', ''.join(failures))]
-    tab_html = ''.join(f'<button type="button" id="{anchor}-tab-{key}" role="tab" aria-controls="{anchor}-{key}" aria-selected="{str(i == 0).lower()}" tabindex="{0 if i == 0 else -1}">{title}</button>'
-                       for i, (key, title, _) in enumerate(panels_body))
-    content_html = ''.join(f'<div class="contract-panel" id="{anchor}-{key}" role="tabpanel" aria-labelledby="{anchor}-tab-{key}">{content}</div>'
-                           for key, _, content in panels_body)
-    return f'''<section class="api view" id="{anchor}" data-title="{esc(summary)}">
-<div class="breadcrumb">接口参考 <span>/</span> {esc(rec['module']['title'])} <span>/</span> {esc(op.get('operationId', summary))}</div>
-<div class="endpoint-title"><div><div class="eyebrow">{esc(rec['module']['title'])}</div><h1>{esc(summary)}</h1></div>{'<span class="tag deprecated">已弃用</span>' if op.get('deprecated') else ''}</div>
-<div class="endpoint-bar"><span class="method m-{rec['method'].lower()}">{rec['method']}</span><code>{esc(rec['path'])}</code><button type="button" class="copy-code" data-copy="{anchor}-url">复制 URL</button></div>
-<div class="endpoint-meta">{chips}<span class="auth-badge">{esc(label)}</span><span>Base URL <code>{esc(rec['base']) or '待确认'}</code></span><a class="agent-entry" href="#agent" data-agent-scope="{anchor}">交给 Agent ↗</a></div>
-<span id="{anchor}-url" hidden>{esc(rec['base'].rstrip('/') + rec['path'])}</span>
-<div class="workspace"><div class="contract"><div class="tabs" role="tablist" aria-label="{esc(summary)}详情">{tab_html}</div>{content_html}</div>
-<aside class="code-rail"><div class="rail-heading"><span class="eyebrow">开发示例</span><label class="sr-only" for="{anchor}-select">选择代码示例</label><select id="{anchor}-select" class="snippet-select">{''.join(tabs)}</select></div>{''.join(panels)}<p class="code-footnote">示例中的占位值需要替换。生成示例不代表业务推荐值。</p></aside></div></section>'''
-
-
-def render_workflows(records):
-    cards = []
-    for flow in CONFIG.get('workflows', []):
-        steps = []
-        for step in flow.get('steps', []):
-            matches = [r for r in records if (not step.get('module') or step['module'] == r['module']['title']) and
-                       ((step.get('operationId') and r['op'].get('operationId') == step['operationId']) or
-                        (step.get('endpoint') and step['endpoint'] == r['method'] + ' ' + r['path']))]
-            if len(matches) != 1:
-                raise ValueError(f'流程 {flow.get("title")}: 接口引用需唯一匹配，实际 {len(matches)} 条: {step}')
-            r = matches[0]
-            steps.append(f'<li><a href="#{r["id"]}">{esc(r["op"].get("summary") or r["path"])} <span>↗</span></a><p>{esc(step.get("note", ""))}</p></li>')
-        cards.append(f'<article class="flow-card"><h3>{esc(flow.get("title", ""))}</h3><p class="muted">{esc(flow.get("description", ""))}</p><ol>{"".join(steps)}</ol></article>')
-    return '<div class="flow-grid">' + ''.join(cards) + '</div>' if cards else '<div class="quiet-note">尚未补充页面调用流程。可根据真实业务配置 workflows，将页面动作关联到接口。</div>'
-
-
-def render_overview(records):
-    groups = []
-    for module in MODULES:
-        operations = [r for r in records if r['module'] is module]
-        base = operations[0]['base'] if operations else module.get('baseUrl', '')
-        links = ''.join(f'<a class="endpoint-link" href="#{r["id"]}"><span class="method m-{r["method"].lower()}">{r["method"]}</span><span><strong>{esc(r["op"].get("summary") or r["path"])}</strong><code>{esc(r["path"])}</code></span><span class="arrow">↗</span></a>' for r in operations)
-        groups.append(f'<article class="module-card"><div class="section-heading"><h3>{esc(module["title"])}</h3><span>{len(operations)} 个接口</span></div><code class="base-url">{esc(base) or "Base URL 待确认"}</code><p class="muted">{esc(module.get("note", ""))}</p>{links or "<p class=muted>无接口</p>"}</article>')
-    missing_auth = sum(auth_text(r['op'], r['doc'])[0] == '待确认' for r in records)
-    missing_errors = sum(not any(not str(c).startswith('2') for c in r['op'].get('responses', {})) for r in records)
-    guides = ''.join(f'<article class="guide-card"><span class="guide-index">{i + 1:02}</span><h3>{esc(g["title"])}</h3><p>{esc(g["text"])}</p></article>' for i, g in enumerate(CONFIG.get('integration', [])))
-    if not guides:
-        guides = '<div class="quiet-note">尚未补充接入约定。建议确认登录态来源、分页、空值、时间与业务错误的处理方式。</div>'
-    return f'''<section class="view overview" id="overview" data-title="开始对接">
-<div class="breadcrumb">项目文档 <span>/</span> 开始对接</div>
-<header class="hero"><div class="eyebrow">FRONTEND INTEGRATION GUIDE</div><h1>{esc(TITLE)}</h1><p>{esc(CONFIG.get('description', '从页面动作找到接口，把参数、响应与异常一次对齐。'))}</p><div class="hero-bottom"><span class="audience">{esc(CONFIG.get('audience', '面向前端开发'))}</span><a href="#catalog">浏览接口 <span>↘</span></a></div></header>
-<div class="stats"><div><strong>{len(records):02}</strong><span>接口</span></div><div><strong>{len(MODULES):02}</strong><span>模块</span></div><div><strong>{len(CONFIG.get('workflows', [])):02}</strong><span>调用流程</span></div><div><strong>{sum(1 for r in records if r['hints'].get('notes')):02}</strong><span>已补充联调提示</span></div></div>
-<div class="section-heading"><div><div class="eyebrow">01 / GET STARTED</div><h2>接入前，先对齐这些</h2></div><span>项目级约定</span></div><div class="guide-grid">{guides}</div>
-{''.join(f'<div class="legacy-note">{note}</div>' for note in HERO_NOTES)}
-<div class="section-heading"><div><div class="eyebrow">02 / USER FLOWS</div><h2>按页面动作串起接口</h2></div><span>点击步骤查看契约</span></div>{render_workflows(records)}
-<div class="section-heading" id="catalog"><div><div class="eyebrow">03 / API REFERENCE</div><h2>接口目录</h2></div><span>功能名称 · 方法 · 路径</span></div><div class="module-grid">{''.join(groups)}</div>
-<div class="coverage"><h3>联调前待确认</h3><p>{missing_auth} 个接口未声明鉴权，{missing_errors} 个接口未声明异常响应。缺失声明不代表无需鉴权或不会失败，请结合后端实现确认。</p></div></section>'''
-
-
-def render_enums():
-    if not ENUMS:
-        return ''
-    cards = []
-    for block in ENUMS:
-        rows = ''.join(f'<tr><td><code>{esc(row[0])}</code></td><td>{esc(row[1]) if len(row) > 1 else ""}</td></tr>' for row in block.get('rows', []) if row)
-        cards.append(f'<article class="module-card"><h3>{esc(block.get("title", ""))}</h3><table><thead><tr><th>字段</th><th>取值说明</th></tr></thead><tbody>{rows}</tbody></table></article>')
-    return '<section class="view" id="enums" data-title="枚举速查"><div class="breadcrumb">项目文档 / 枚举速查</div><h1>枚举与取值速查</h1><div class="module-grid">' + ''.join(cards) + '</div></section>'
+<div><label for="agent-task">02 · 本次要调整什么（可选）</label><textarea id="agent-task" rows="3" placeholder="例如：把订单列表新增的筛选与状态接入已有页面，处理取消接口的新响应。">{esc(data['task'])}</textarea></div></div>
+<div class="handoff-toolbar"><div><strong>03 · 交给 Agent</strong><p id="agent-summary">{default_count} 个接口 · {changes} 项接口变更 · 含最新契约</p></div>
+<div class="handoff-actions"><button type="button" class="btn primary" data-copy="agent-packet">复制任务包</button>
+<button type="button" class="btn" id="agent-download-md">下载 .md</button><button type="button" class="btn" id="agent-download-json">下载契约 .json</button></div></div>
+<p class="handoff-note">任务包不包含「工作方式」「验收要求」等通用模板，也不读取本机令牌或调用真实接口。分享前请核对契约说明中是否含有不应外发的业务数据。</p>
+<div class="packet"><div class="packet-head"><span>任务包预览 · Markdown</span><span>默认范围：{esc(default_scope['label'])}</span></div>
+<pre id="agent-packet"></pre></div>
+<noscript><p class="quiet">此模块的范围选择与导出需要启用 JavaScript。接口参考仍可直接阅读。</p></noscript></section>'''
 
 
 class _Checker(HTMLParser):
@@ -798,35 +1243,50 @@ def verify(doc):
 
 def build():
     records = collect_operations()
-    agent_data = handoff_data(records)
-    # Inline data is JSON, not executable script; escape HTML script terminators.
+    if not records:
+        print('[error] 未匹配到任何接口；请检查模块 OpenAPI 或过滤范围。', file=sys.stderr)
+        return 1
+    diffs = compute_diffs(records)
+    agent_data = handoff_data(records, diffs)
     agent_json = json.dumps(agent_data, ensure_ascii=False).replace('<', '\\u003c').replace('>', '\\u003e').replace('&', '\\u0026')
     nav = []
-    for index, module in enumerate(MODULES):
+    for module in MODULES:
         group = [r for r in records if r['module'] is module]
         links = []
         for r in group:
             summary = r['op'].get('summary') or r['op'].get('operationId') or r['path']
             searchable = search_contract([module['title'], r['method'], r['path'], r['op'], r['hints']], r['doc'])
-            links.append(f'<a class="nav-item" href="#{r["id"]}" data-method="{r["method"]}" data-search="{esc(searchable)}"><span class="nav-label">{esc(summary)}</span><span class="nav-detail"><span class="method m-{r["method"].lower()}">{r["method"]}</span><code>{esc(r["path"])}</code></span></a>')
+            if r.get('changes'):
+                searchable += ' ' + ' '.join(c['text'] + ' ' + c['field'] for c in r['changes'])
+            links.append(f'<a class="nav-item" href="#{r["id"]}" data-method="{r["method"]}" data-changed="{r.get("change_status") or ""}" data-search="{esc(searchable)}">'
+                         f'<span class="nav-label">{esc(summary)} {badge_for(r)}</span>'
+                         f'<span class="nav-detail"><span class="method {r["method"].lower()}">{r["method"]}</span><code>{esc(r["path"])}</code></span></a>')
         nav.append(f'<div class="nav-group"><div class="nav-title"><span>{esc(module["title"])}</span><span>{len(group)}</span></div>{"".join(links)}</div>')
     method_options = ''.join(f'<option value="{m}">{m}</option>' for m in sorted({r['method'] for r in records}))
+    changed_switch = ('<label class="switch"><input type="checkbox" id="changed-only"> 只看本次变更</label>'
+                      if diffs['has_baseline'] else '')
+    changes_nav = (f'<a class="nav-main" href="#changes">本次变更 <span class="count">{diffs["total"]}</span></a>'
+                   if diffs['has_baseline'] else '')
+    enums_nav = '<a class="nav-main" href="#enums">枚举速查</a>' if ENUMS else ''
+    baseline_footer = (f'变更基线 <b>{esc(BASELINE_LABEL)}</b><br>{esc(BASELINE_DATE)} · ' if diffs['has_baseline'] else '')
     css = (ASSETS / 'document.css').read_text(encoding='utf-8')
     js = (ASSETS / 'agent-handoff.js').read_text(encoding='utf-8') + '\n' + (ASSETS / 'document.js').read_text(encoding='utf-8')
     doc = f'''<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>{esc(TITLE)}</title><style>{css}</style></head>
-<body><a href="#content" class="skip-link">跳到正文</a><div class="app-shell">
-<aside class="sidebar" aria-label="文档导航"><a class="brand" href="#overview"><span class="brand-icon">↗</span><span>{esc(TITLE)}<small>接口对接手册</small></span></a>
-<div class="search-box"><label class="sr-only" for="search">搜索接口、字段或功能</label><input id="search" type="search" placeholder="搜索接口、字段或功能…" autocomplete="off"><kbd>/</kbd></div>
-<label class="sr-only" for="method-filter">筛选 HTTP 方法</label><select id="method-filter"><option value="">全部方法</option>{method_options}</select>
-<nav><a class="overview-link" href="#overview">◫ <span>开始对接</span><span>↗</span></a><a class="overview-link agent-nav" href="#agent">✧ <span>交给 Agent</span><span>↗</span></a><div class="nav-caption">接口参考</div>{''.join(nav)}<p id="no-results" hidden>没有匹配接口，试试功能名或字段名。</p>
-{('<a class="overview-link" href="#enums">≡ <span>枚举速查</span></a>' if ENUMS else '')}</nav>
-<div class="sidebar-footer"><span class="offline-dot"></span> 离线可用 <span>·</span> {len(records)} 个接口</div></aside>
-<div class="main-shell"><header class="topbar"><button type="button" id="menu-toggle" aria-expanded="false" aria-controls="sidebar-panel">☰ <span>导航</span></button><span>开发文档 <span class="topbar-divider">/</span> <strong id="current-title">开始对接</strong></span><button type="button" id="print-button">打印 / PDF ↗</button></header>
-<main id="content" tabindex="-1">{render_overview(records)}{''.join(render_endpoint(r) for r in records)}{render_enums()}{render_agent_handoff(agent_data)}<footer>由接口契约生成 · {datetime.now().strftime('%Y-%m-%d')} · 业务约定以已确认说明为准</footer></main></div></div>
-<div class="toast" role="status" aria-live="polite" hidden></div><script id="agent-data" type="application/json">{agent_json}</script><script>{js}</script></body></html>'''
-    # aria-controls target is stable for mobile navigation.
-    doc = doc.replace('<aside class="sidebar"', '<aside id="sidebar-panel" class="sidebar"', 1)
+<body><a href="#content" class="skip">跳到正文</a><div class="app">
+<aside class="sidebar" id="sidebar" aria-label="文档导航"><a class="brand" href="#overview"><span class="brand-mark">Δ</span><span>{esc(TITLE)}<small>前端对接手册</small></span></a>
+<div class="search"><label class="sr-only" for="nav-search">搜索接口、字段或变更</label><input id="nav-search" type="search" placeholder="搜索接口、字段或变更…" autocomplete="off"><kbd>/</kbd></div>
+<div class="side-filters"><label class="sr-only" for="method-filter">筛选 HTTP 方法</label>
+<select id="method-filter"><option value="">全部方法</option>{method_options}</select>{changed_switch}</div>
+<nav><a class="nav-main" href="#overview">开始对接</a>{changes_nav}<a class="nav-main" href="#agent">交给 Agent</a>
+<div class="nav-caption">接口参考</div>{''.join(nav)}{enums_nav}<p class="no-results" id="no-results" hidden>没有匹配接口，试试功能名或字段名。</p></nav>
+<div class="sidebar-footer">{baseline_footer}离线可用 · {len(records)} 个接口</div></aside>
+<div class="main"><header class="topbar"><div style="display:flex;align-items:center;gap:12px"><button type="button" id="menu-toggle" aria-expanded="false" aria-controls="sidebar">☰ <span>导航</span></button>
+<div class="crumbs">开发文档<span>/</span><strong id="current-title">开始对接</strong></div></div>
+<div class="topbar-right"><button type="button" id="print-button">打印 / PDF ↗</button></div></header>
+<main id="content" tabindex="-1">{render_overview(records, diffs)}{render_changes(records, diffs)}{''.join(render_endpoint(r) for r in records)}{render_enums()}{render_agent_handoff(agent_data)}</main></div></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<script id="agent-data" type="application/json">{agent_json}</script><script>{js}</script></body></html>'''
     result = verify(doc)
     bad = {k: v for k, v in result.items() if v}
     if bad:
@@ -838,6 +1298,8 @@ def build():
     for module in MODULES:
         print(f'  - {module["title"]}: {sum(r["module"] is module for r in records)} 个接口')
     print(f'  合计: {len(records)} 个接口；自检通过（标签/锚点/唯一 ID）')
+    if diffs['has_baseline']:
+        print(f'  变更: 新增 {diffs["added"]} · 修改 {diffs["modified"]} · 移除 {diffs["removed"]} · 破坏性 {diffs["breaking"]}')
     return 0
 
 
@@ -847,6 +1309,9 @@ def load_config(path):
     for module in cfg.get('modules', []):
         p = Path(module['openapi'])
         module['openapi'] = str(p if p.is_absolute() else base / p)
+        if module.get('baseline'):
+            bp = Path(module['baseline'])
+            module['baseline'] = str(bp if bp.is_absolute() else base / bp)
     out = Path(cfg.get('out', 'api-doc.html'))
     cfg['out'] = str(out if out.is_absolute() else base / out)
     cfg['srcRoots'] = [str(Path(s) if Path(s).is_absolute() else base / s) for s in cfg.get('srcRoots', [])]
@@ -855,6 +1320,7 @@ def load_config(path):
 
 def apply_config(cfg):
     global TITLE, OUT, HERO_NOTES, ENUMS, MODULES, PARAM_DOCS, EXTRA_FIELD_DOCS, FIELD_DOCS, CONFIG
+    global BASELINE_LABEL, BASELINE_DATE
     CONFIG = cfg
     TITLE = cfg.get('title', '接口对接清单')
     OUT = Path(cfg.get('out', 'api-doc.html'))
@@ -863,6 +1329,8 @@ def apply_config(cfg):
     MODULES = cfg.get('modules', [])
     PARAM_DOCS = dict(cfg.get('paramDocs') or {})
     EXTRA_FIELD_DOCS = dict(cfg.get('fieldDocs') or {})
+    BASELINE_LABEL = cfg.get('baselineLabel', '生产环境')
+    BASELINE_DATE = cfg.get('baselineDate', '')
     FIELD_DOCS = extract_field_docs(cfg.get('srcRoots') or [], collect_schema_names(MODULES))
 
 
@@ -898,7 +1366,7 @@ def main():
                 parser.error(f'需要包含 paths 的 OpenAPI 3 JSON: {module["openapi"]}')
         apply_config(cfg)
         return build()
-    except (OSError, ValueError, KeyError, TypeError) as err:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as err:
         parser.error(str(err))
 
 

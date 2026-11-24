@@ -7,7 +7,7 @@
 | --- | --- | --- |
 | [scaffold](scaffold/SKILL.md) | 按现有仓库结构新增模块、接口、实体或 CRUD 骨架 | 目标仓库代码与构建环境；内置 Java、Node/TS、Python、Go 模板 |
 | [api-exporter](api-exporter/SKILL.md) | 查询或筛选 Spring Boot 端点，导出 OpenAPI JSON，按需同步 Apifox | Rust/Cargo 编译内置 CLI；同步时需要 Apifox 凭据 |
-| [api-doc-html](api-doc-html/SKILL.md) | 生成带接入约定、页面流程、字段契约、Fetch / TypeScript 示例及 Agent 交接包的单文件对接手册 | Python 3；从源码生成时另需 api-exporter |
+| [api-doc-html](api-doc-html/SKILL.md) | 生成带接入约定、页面流程、字段契约、生产环境变更对比及 Agent 交接包的单文件对接手册 | Python 3；从源码生成或导出生产基线时另需 api-exporter 与 git |
 | [visual-eyes](visual-eyes/SKILL.md) | 主模型无法读图或指定 Ollama 时，进行 OCR、图片问答和对比 | Python 3.10+、Ollama 服务和视觉模型 |
 
 ## 安装
@@ -36,4 +36,4 @@ HTML 源码导出流程的离线回归测试（不连接 Apifox，不需要 Rust
 python3 -m unittest discover -s api-doc-html/tests -v
 ```
 
-前端手册效果演示：[订单中心对接手册](api-doc-html/examples/frontend-guide.html)（虚构数据）。
+前端手册效果演示：[订单中心对接手册](api-doc-html/examples/frontend-guide.html)（虚构数据，含生产基线变更对比）。

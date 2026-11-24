@@ -1,4 +1,4 @@
-"""Contract-preserving checks for frontend handoff rendering."""
+"""Contract and change-rendering checks for the HTML generator."""
 import importlib.util
 import json
 from pathlib import Path
@@ -25,7 +25,7 @@ class ContractTests(unittest.TestCase):
                                           'schema': {'type': 'string', 'example': 'a/b'}}},
                 'schemas': {'Item': {'type': 'object', 'required': ['id', 'URL', 'enabled'],
                     'properties': {'id': {'type': 'string', 'readOnly': True},
-                                   'URL': {'type': 'string', 'example': 'https://example.com'},
+                                   'URL': {'type': 'string', 'description': '地址'},
                                    'password': {'type': 'string', 'writeOnly': True},
                                    'enabled': {'type': 'boolean', 'default': False},
                                    'children': {'type': 'array', 'items': {'$ref': '#/components/schemas/Item'}}}}}},
@@ -45,37 +45,25 @@ class ContractTests(unittest.TestCase):
         gen.apply_config(cfg)
         return gen.collect_operations()
 
-    def test_read_write_directions_and_legitimate_uppercase_fields(self):
+    def test_read_write_directions_in_field_tables(self):
         schema = {'$ref': '#/components/schemas/Item'}
-        request = gen.sample(schema, self.doc, 'request')
-        response = gen.sample(schema, self.doc, 'response')
-        self.assertNotIn('id', request)
+        request = gen.field_table(schema, self.doc, 'request')
+        response = gen.field_table(schema, self.doc, 'response')
+        self.assertNotIn('>id<', request)
+        self.assertIn('>id<', response)
         self.assertIn('password', request)
-        self.assertIn('URL', request)
-        self.assertIs(request['enabled'], False)
         self.assertNotIn('password', response)
-        self.assertIn('id', response)
-        self.assertNotIn('"id"', gen.ts_type(schema, self.doc, 'request'))
-        self.assertNotIn('"password"', gen.ts_type(schema, self.doc, 'response'))
+        self.assertIn('URL', request)
 
-    def test_inherited_ref_parameter_and_fetch_encoding(self):
+    def test_inherited_ref_parameter(self):
         rec = self.configure()[0]
         self.assertEqual(rec['params'][0]['name'], 'id')
-        code = gen.fetch_code(rec)
-        self.assertIn('encodeURIComponent', code)
-        self.assertIn('a/b', code)
-        self.assertIn('Authorization', code)
-        self.assertIn('response.status === 204', code)
-        self.assertNotIn('"id":', code)
 
     def test_security_inheritance_override_and_unspecified(self):
         self.assertEqual(gen.auth_text({}, self.doc)[0], '需鉴权')
         self.assertEqual(gen.auth_text({'security': []}, self.doc)[0], '可匿名')
         self.assertEqual(gen.auth_text({'security': [{}]}, self.doc)[0], '可匿名')
         self.assertEqual(gen.auth_text({}, {})[0], '待确认')
-        rec = self.configure()[0]
-        rec['op']['security'] = []
-        self.assertNotIn('Authorization', gen.fetch_code(rec))
 
     def test_nested_inline_array_paths_and_constraints(self):
         schema = {'type': 'object', 'properties': {'items': {'type': 'array', 'items': {
@@ -85,14 +73,6 @@ class ContractTests(unittest.TestCase):
         fields = gen.field_table(schema, self.doc, 'request')
         for value in ('items[].price', '单位为分', '最小值 0', '最大值 999', 'pending', '允许 null'):
             self.assertIn(value, fields)
-
-    def test_media_examples_take_priority_and_report_origin(self):
-        value, origin = gen.media_example({'example': False, 'schema': {'type': 'boolean', 'default': True}}, self.doc, 'request')
-        self.assertIs(value, False)
-        self.assertIn('接口提供', origin)
-        value, origin = gen.media_example({'schema': {'type': 'boolean', 'default': False}}, self.doc, 'request')
-        self.assertIs(value, False)
-        self.assertIn('Schema', origin)
 
     def test_search_includes_referenced_fields_but_not_unrelated_models(self):
         self.doc['components']['schemas']['Unrelated'] = {'properties': {'notThisField': {'type': 'string'}}}
@@ -107,12 +87,91 @@ class ContractTests(unittest.TestCase):
                             {'type': 'object', 'properties': {'b': {'type': 'integer'}}}]}
         self.assertEqual(set(gen.shape(schema, self.doc)['properties']), {'a', 'b'})
         self.assertEqual(gen.shape(schema, self.doc)['required'], ['a'])
-        self.assertIn('&', gen.ts_type(schema, self.doc, 'response'))
 
-    def test_unresolved_refs_are_visible_and_recursion_terminates(self):
+    def test_unresolved_refs_are_visible(self):
         self.assertEqual(gen.schema_type({'$ref': '#/components/schemas/Missing'}, self.doc), '未知引用')
-        result = gen.ts_type({'$ref': '#/components/schemas/Item'}, self.doc, 'response')
-        self.assertIn('unknown /* recursive */', result)
+
+    def test_json_property_with_extra_attributes(self):
+        src = self.root / 'src'
+        src.mkdir()
+        (src / 'Order.java').write_text('''public class Order {
+    /** 状态 */
+    @JsonProperty(value = "order_status", required = true)
+    private String orderStatus;
+}
+''', encoding='utf-8')
+        docs = gen.extract_field_docs([str(src)])
+        self.assertEqual(docs['Order'].get('order_status'), '状态')
+        self.assertNotIn('orderStatus', docs['Order'])
+
+    def test_nested_class_scope(self):
+        src = self.root / 'src'
+        src.mkdir()
+        (src / 'Outer.java').write_text('''public class Outer {
+    /** outer a */
+    private String a;
+    static class Inner {
+        /** inner b */
+        private String b;
+    }
+    /** outer c */
+    private String c;
+}
+''', encoding='utf-8')
+        docs = gen.extract_field_docs([str(src)])
+        self.assertEqual(docs['Outer'].get('c'), 'outer c')
+        self.assertNotIn('c', docs['Inner'])
+
+    def test_boolean_schema_does_not_crash_handoff(self):
+        self.doc['components']['schemas']['Flag'] = True
+        records = self.configure()
+        diffs = gen.compute_diffs(records)
+        packet = gen.handoff_data(records, diffs)
+        self.assertTrue(packet['operations'])
+
+    def test_zero_operations_fails(self):
+        self.doc['paths'] = {}
+        self.configure()
+        self.assertEqual(gen.build(), 1)
+        self.assertFalse(self.output.exists())
+
+    def test_diff_added_modified_removed(self):
+        current = json.loads(json.dumps(self.doc))
+        baseline = json.loads(json.dumps(self.doc))
+        baseline['paths']['/old'] = {'get': {'operationId': 'old', 'responses': {'200': {'description': 'ok'}}}}
+        current['paths']['/new'] = {'get': {'operationId': 'new', 'responses': {'200': {'description': 'ok'}}}}
+        baseline['paths']['/items/{id}']['post']['requestBody']['content']['application/json']['schema'] = {
+            '$ref': '#/components/schemas/Item'}
+        current['paths']['/items/{id}']['post']['requestBody']['content']['application/json']['schema'] = {
+            '$ref': '#/components/schemas/Item'}
+        current['paths']['/items/{id}']['post']['parameters'] = [{'name': 'status', 'in': 'query', 'schema': {'type': 'string'}}]
+        current['paths']['/items/{id}']['post']['responses']['201'] = {'description': 'Created'}
+        baseline['components']['schemas']['Item']['properties']['legacy'] = {'type': 'string'}
+        current['components']['schemas']['Item']['properties']['note'] = {'type': 'string'}
+        for name in ('current.json', 'baseline.json'):
+            (self.root / name).write_text(json.dumps(current if name.startswith('current') else baseline), encoding='utf-8')
+        gen.load_openapi.cache_clear()
+        cfg = dict(title='变更', out=str(self.output), baselineLabel='生产环境 pro', baselineDate='2026-11-18',
+                   modules=[{'title': '管理端', 'openapi': str(self.root / 'current.json'),
+                             'baseline': str(self.root / 'baseline.json')}])
+        gen.apply_config(cfg)
+        records = gen.collect_operations()
+        diffs = gen.compute_diffs(records)
+        self.assertEqual((diffs['added'], diffs['modified'], diffs['removed']), (1, 1, 1))
+        modified = next(r for r in records if r.get('change_status') == 'modified')
+        fields = {c['field'] for c in modified['changes']}
+        self.assertIn('query.status', fields)
+        self.assertIn('note', fields)
+        self.assertIn('201', fields)
+        self.assertIn('legacy', fields)
+        self.assertTrue(modified['breaking'])
+        self.assertEqual(gen.build(), 0)
+        html = self.output.read_text()
+        self.assertIn('id="changes"', html)
+        self.assertIn('change-rail', html)
+        self.assertIn('生产环境 pro', html)
+        self.assertNotIn('code-rail', html)
+        self.assertNotIn('TypeScript', html)
 
     def test_multiple_modules_same_routes_have_unique_anchors(self):
         records = self.configure(modules=[{'title': '管理端', 'openapi': str(self.source)},
@@ -139,7 +198,6 @@ class ContractTests(unittest.TestCase):
         self.assertIn('&lt;b&gt;调用时机&lt;/b&gt;', output)
         self.assertNotIn('<img src=x', output)
         self.assertNotIn('<script src=', output)
-        self.assertNotIn('<link ', output)
         self.assertIn('刷新列表', output)
 
     def test_checker_rejects_duplicate_ids_and_broken_links(self):

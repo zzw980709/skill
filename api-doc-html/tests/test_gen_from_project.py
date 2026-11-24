@@ -5,6 +5,7 @@ Run: python3 -m unittest discover -s api-doc-html/tests -v
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -44,6 +45,49 @@ pathlib.Path(args[args.index('--out') + 1]).write_text(json.dumps(doc))
 
     def base_args(self):
         return ['--project', str(self.project), '--out', 'output/docs.html']
+
+    def git(self, *args):
+        return subprocess.run(['git', '-C', str(self.project), *args],
+                              text=True, capture_output=True, check=True)
+
+    def init_git(self):
+        self.git('init', '-q')
+        (self.project / 'src/main/java/App.java').write_text('class App {}\n', encoding='utf-8')
+        self.git('add', '.')
+        self.git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-q', '-m', 'init')
+
+    @unittest.skipUnless(shutil.which('git'), 'git needed for production baseline checks')
+    def test_base_pro_uses_latest_production_tag(self):
+        self.init_git()
+        self.git('tag', 'v1-backend')
+        self.git('tag', 'v2-backend')
+        result = self.run_script(*self.base_args(), '--include', 'GET /orders', '--base', 'pro')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        html = (self.root / 'output/docs.html').read_text(encoding='utf-8')
+        self.assertIn('生产环境 pro', html)
+        self.assertIn('id="changes"', html)
+        self.assertIn('变更基线', html)
+
+    @unittest.skipUnless(shutil.which('git'), 'git needed for production baseline checks')
+    def test_base_pro_without_tag_fails(self):
+        self.init_git()
+        result = self.run_script(*self.base_args(), '--include', 'GET /orders', '--base', 'pro')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('v*-backend', result.stderr)
+        self.assertFalse((self.root / 'output/docs.html').exists())
+
+    def test_baseline_file_is_used(self):
+        baseline = self.root / 'baseline.json'
+        baseline.write_text(json.dumps({'openapi': '3.0.0', 'info': {'title': 'Old', 'version': '0.9'},
+                                        'paths': {'/old': {'get': {'operationId': 'old',
+                                                   'responses': {'200': {'description': 'OK'}}}}}}), encoding='utf-8')
+        result = self.run_script(*self.base_args(), '--include', 'GET /orders',
+                                 '--baseline', str(baseline), '--baseline-label', '生产环境 pro')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        html = (self.root / 'output/docs.html').read_text(encoding='utf-8')
+        self.assertIn('生产环境 pro', html)
+        self.assertIn('/old', html)
+        self.assertIn('id="changes"', html)
 
     def test_filtered_export_is_local_and_preserves_paths(self):
         result = self.run_script(*self.base_args(), '--include', 'GET /orders',
