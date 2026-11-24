@@ -720,6 +720,15 @@ def render_change_item(item, compact=False):
             f'<small>{esc(text)}</small></div></li>')
 
 
+def render_change_list(items, limit=4):
+    shown = items[:limit]
+    out = ''.join(render_change_item(item, True) for item in shown)
+    if len(items) > limit:
+        out += (f'<li class="diff-item muted"><span class="mark">…</span>'
+                f'<div><p>还有 {len(items) - limit} 项，见变更明细。</p></div></li>')
+    return out or '<li class="muted">无变化</li>'
+
+
 def change_counts(changes):
     counts = {'请求': 0, '响应': 0, '接口': 0, '鉴权': 0}
     for item in changes:
@@ -753,9 +762,9 @@ def render_change_card(rec, link=True):
         response_items = [c for c in rec.get('changes', []) if c['area'] in ('响应', '接口', '鉴权')]
         body = ('<div class="change-cols">'
                 f'<div class="change-col"><div class="change-col-title">请求 <span>{len(request_items)}</span></div>'
-                f'<ul class="diff-list">{"".join(render_change_item(c, True) for c in request_items) or "<li class=muted>无请求变化</li>"}</ul></div>'
+                f'<ul class="diff-list">{render_change_list(request_items)}</ul></div>'
                 f'<div class="change-col"><div class="change-col-title">响应 <span>{len(response_items)}</span></div>'
-                f'<ul class="diff-list">{"".join(render_change_item(c, True) for c in response_items) or "<li class=muted>无响应变化</li>"}</ul></div>'
+                f'<ul class="diff-list">{render_change_list(response_items)}</ul></div>'
                 '</div>')
     foot = ''
     if status == 'modified':
